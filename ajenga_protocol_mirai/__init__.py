@@ -1,31 +1,42 @@
 import asyncio
+import contextvars
 import json
-from typing import Optional, Dict, List
+from functools import wraps
+from typing import List
+from typing import Optional
 from urllib.parse import urlparse
 from urllib.request import url2pathname
-import contextvars
 
 import aiofiles
 import aiohttp
 import quart
 from quart import Quart
 
+import ajenga.message as raw_message
+from ajenga.event import FriendMessageEvent
+from ajenga.event import GroupMessageEvent
+from ajenga.event import GroupMuteEvent
+from ajenga.event import GroupPermission
+from ajenga.event import GroupRecallEvent
+from ajenga.event import GroupUnmuteEvent
+from ajenga.event import Sender
+from ajenga.event import TempMessageEvent
 from ajenga.log import logger
-
-import ajenga.models.message as raw_message
-from ajenga.models.contact import Group, GroupMember
-from ajenga.models.message import MessageChain, MessageElement, Message_T
-from ajenga.models.event_impl import MessageEvent, GroupPermission, Sender, \
-    GroupMuteEvent, GroupRecallEvent, GroupUnmuteEvent, GroupMessageEvent, FriendMessageEvent, TempMessageEvent
+from ajenga.message import MessageChain
+from ajenga.message import MessageElement
+from ajenga.message import Message_T
+from ajenga.models import Group
+from ajenga.models import GroupMember
 from ajenga.protocol import Api
-from ajenga.protocol.api import ApiResult, MessageSendResult
+from ajenga.protocol import ApiResult
+from ajenga.protocol import Code
+from ajenga.protocol import MessageSendResult
 from ajenga_app import BotSession
-
+from .api import ApiError
 
 logger = logger.getChild('mirai-protocol')
 
 from . import api
-
 
 upload_method = contextvars.ContextVar('upload_method')
 METHOD_GROUP = 'group'
@@ -40,10 +51,18 @@ class Source(raw_message.Meta):
 
 
 class Image(raw_message.Image):
-    def __init__(self, *, url=None, content=None, id_=None, type_=None):
+    def __init__(self, *,
+                 url: str = None,
+                 content: bytes = None,
+                 id_: str = None,
+                 type_: str = None):
         super(Image, self).__init__(url=url, content=content)
         self.type_ = type_ or upload_method.get()
         self.id_ = id_
+        if self.id_:
+            ind_start = self.id_.index('{') + 1
+            ind_end = self.id_.index('}')
+            self.hash_ = id_[ind_start:ind_end].replace('-', '').lower()
         if not id_ and type_:
             self.task = asyncio.create_task(self._prepare())
         else:
@@ -77,10 +96,22 @@ class Image(raw_message.Image):
             raise ValueError("No upload method specified for Image!")
 
     def raw(self) -> "MessageElement":
-        return raw_message.Image(url=self.url, content=self.content)
+        return raw_message.Image(url=self.url, content=self.content, hash_=self.hash_)
 
     def __eq__(self, other):
-        return isinstance(other, Image) and self.id_ == other.id_
+        return (isinstance(other, Image) and self.id_ == other.id_) or super(Image, self).__eq__(other)
+
+
+class Voice(raw_message.Voice):
+    def __init__(self, *,
+                 url: str = None,
+                 content: bytes = None,
+                 id_: str = None,
+                 type_=None):
+        super().__init__(url, content)
+        self.id_ = id_
+        if self.id_:
+            self.hash_ = id_[:self.id_.find('.')].lower()
 
 
 class Quote(raw_message.Quote):
@@ -91,9 +122,41 @@ class Quote(raw_message.Quote):
         return raw_message.Quote(id_=self.id_)
 
 
+def _catch(func):
+    @wraps(func)
+    async def wrapper(self, *args, **kwargs):
+        while True:
+            try:
+                return await func(self, *args, **kwargs)
+            except ApiError as e:
+                if e.code == ApiError.CODE_SESSION_FAILED:
+                    logger.info('Re-login Mirai')
+                    new_session_key = await auth(api_root=self._api_root,
+                                                 auth_key=self._auth_key)
+                    if not new_session_key:
+                        return ApiResult(Code.Unavailable)
+
+                    self._api.update_session(new_session_key)
+
+                    if await self._api.verify(qq=self.qq):
+                        logger.info('Re-login Success')
+                        continue
+                    else:
+                        return ApiResult(Code.Unavailable)
+                else:
+                    return ApiResult(e.code)
+            except Exception as e:
+                logger.exception(e)
+                return ApiResult(Code.Unspecified, message=str(e))
+
+    return wrapper
+
+
 class MiraiSession(BotSession, Api):
-    def __init__(self, api_root, session_key, qq):
+    def __init__(self, api_root, auth_key, session_key, qq):
         self._qq = qq
+        self._api_root = api_root
+        self._auth_key = auth_key
         self._api = api.HttpApi(api_root, session_key, 30)
 
     @property
@@ -120,31 +183,41 @@ class MiraiSession(BotSession, Api):
 
     # Implement abstract function for Api
 
+    @_catch
     async def send_group_message(self, group: int, message: Message_T) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_GROUP)
         msg = await self.prepare_message(message)
         if quote := msg.get_first(Quote):
             msg.remove(quote)
-            res: dict = await self._api.sendGroupMessage(group=group, messageChain=self.as_mirai_chain(msg), quote=quote.id_)
+            res: dict = await self._api.sendGroupMessage(group=group, messageChain=self.as_mirai_chain(msg),
+                                                         quote=quote.id_)
         else:
             res: dict = await self._api.sendGroupMessage(group=group, messageChain=self.as_mirai_chain(msg))
         upload_method.reset(token)
-        return ApiResult(res.get('code'), res.get('message'), res.get('messageId'))
+        return ApiResult(res.get('code'), MessageSendResult(res.get('messageId')))
 
+    @_catch
     async def send_friend_message(self, qq: int, message: Message_T) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_FRIEND)
         msg = await self.prepare_message(message)
         res: dict = await self._api.sendFriendMessage(qq=qq, messageChain=self.as_mirai_chain(msg))
         upload_method.reset(token)
-        return ApiResult(res.get('code'), res.get('message'), res.get('messageId'))
+        return ApiResult(res.get('code'), MessageSendResult(res.get('messageId')))
 
+    @_catch
     async def send_temp_message(self, qq: int, group: int, message: Message_T) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_TEMP)
         msg = await self.prepare_message(message)
         res: dict = await self._api.sendTempMessage(qq=qq, group=group, messageChain=self.as_mirai_chain(msg))
         upload_method.reset(token)
-        return ApiResult(res.get('code'), res.get('message'), res.get('messageId'))
+        return ApiResult(res.get('code'), MessageSendResult(res.get('messageId')))
 
+    @_catch
+    async def recall(self, message_id: raw_message.MessageIdType) -> ApiResult[None]:
+        res: dict = await self._api.recall(target=message_id)
+        return ApiResult(res.get('code'))
+
+    @_catch
     async def get_group_list(self) -> ApiResult[List[Group]]:
         res = await self._api.groupList(request_method='get')
         groups = []
@@ -154,8 +227,9 @@ class MiraiSession(BotSession, Api):
                 name=g.get('name'),
                 permission=self._role_to_permission[g.get('permission')],
             ))
-        return ApiResult(0, 'success', groups)
+        return ApiResult(Code.Success, groups)
 
+    @_catch
     async def get_group_member_list(self, group: int) -> ApiResult[List[GroupMember]]:
         res = await self._api.memberList(target=group, request_method='get')
         members = []
@@ -165,11 +239,12 @@ class MiraiSession(BotSession, Api):
                 name=member.get('memberName'),
                 permission=self._role_to_permission[member.get('permission')],
             ))
-        return ApiResult(0, 'status', members)
+        return ApiResult(Code.Success, members)
 
+    @_catch
     async def get_group_member_info(self, group: int, qq: int) -> ApiResult[GroupMember]:
         res = await self._api.memberInfo(target=group, memberId=qq, request_method='get')
-        return ApiResult(0, 'success', GroupMember(
+        return ApiResult(Code.Success, GroupMember(
             id_=res.get('id'),
             name=res.get('memberName'),
             permission=self._role_to_permission[res.get('permission')],
@@ -179,10 +254,17 @@ class MiraiSession(BotSession, Api):
 
     async def _upload_image(self, type_, img: bytes, name: str):
         # return await self.call_action_(action="uploadImage", type=type_, img=img)
-        res = await self._api.upload(filedata=img, filename=name, type=type_, img=img, )
+        res = await self._api.upload_image(filedata=img, filename=name, type=type_)
         img_msg = Image(url=res['url'], id_=res['imageId'], type_=type_)
         img_msg.referer = self
         return img_msg
+
+    async def _upload_record(self, type_, voice: bytes, name: str):
+        # return await self.call_action_(action="uploadImage", type=type_, img=img)
+        res = await self._api.upload_voice(filedata=voice, filename=name, type=type_)
+        voice_msg = Voice(id_=res['voiceId'], type_=type_)
+        voice_msg.referer = self
+        return voice_msg
 
     # Message Transition
 
@@ -204,7 +286,7 @@ class MiraiSession(BotSession, Api):
         elif type_ == 'Image':
             ret = Image(url=msg['url'], id_=msg['imageId'])
         elif type_ == 'Voice':
-            ret = raw_message.Voice(url=msg['url'])
+            ret = Voice(url=msg['url'], id_=msg['voiceId'])
         elif type_ == 'App':
             ret = raw_message.App(content=json.loads(msg['content']))
         else:
@@ -235,7 +317,12 @@ class MiraiSession(BotSession, Api):
         elif isinstance(msg, raw_message.Face):
             return {
                 'type': 'Face',
-                'faceID': msg.id_,
+                'faceId': msg.id_,
+            }
+        elif isinstance(msg, Voice):
+            return {
+                'type': 'Voice',
+                'voiceId': msg.id_,
             }
         elif isinstance(msg, raw_message.Voice):
             return {
@@ -313,33 +400,33 @@ class MiraiSession(BotSession, Api):
                 qq=mi_event['authorId'],
                 message_id=mi_event['messageId'],
                 group=mi_event['group']['id'],
-                operator=mi_event['operator']['id'],
+                operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
             )
             return event
         elif type_ == 'BotMuteEvent':
             event = GroupMuteEvent(
-                qq=None,
-                operator=mi_event['operator']['id'],
+                qq=self.qq,
+                operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
                 duration=mi_event['durationSeconds'],
             )
             return event
         elif type_ == 'MemberMuteEvent':
             event = GroupMuteEvent(
                 qq=mi_event['member']['id'],
-                operator=mi_event['operator']['id'],
+                operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
                 duration=mi_event['durationSeconds'],
             )
             return event
         elif type_ == 'BotUnmuteEvent':
             event = GroupUnmuteEvent(
-                qq=None,
-                operator=mi_event['operator']['id'],
+                qq=self.qq,
+                operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
             )
             return event
         elif type_ == 'MemberUnmuteEvent':
             event = GroupUnmuteEvent(
                 qq=mi_event['member']['id'],
-                operator=mi_event['operator']['id'],
+                operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
             )
             return event
         return None
@@ -373,19 +460,27 @@ class MiraiSession(BotSession, Api):
         return asyncio.create_task(self._server_app.run_task(use_reloader=False, **kwargs))
 
 
-async def connect(host, port, auth_key, qq) -> MiraiSession:
+async def auth(api_root, auth_key):
+    async with aiohttp.request("POST", api_root + 'auth', json={'authKey': auth_key}) as resp:
+        if 200 <= resp.status < 300:
+            result = json.loads(await resp.text())
+            logger.info(f'Login Mirai: {result}')
+            if result.get('code') == 0:
+                return result['session']
+
+
+async def connect(host, port, auth_key, qq) -> Optional[MiraiSession]:
     api_root = f'http://{host}:{port}/'
 
-    async def auth():
-        async with aiohttp.request("POST", api_root + 'auth', json={'authKey': auth_key}) as resp:
-            if 200 <= resp.status < 300:
-                result = json.loads(await resp.text())
-                logger.info(f'Login Mirai: {result}')
-                if result.get('code') == 0:
-                    return result['session']
+    session_key = await auth(api_root=api_root,
+                             auth_key=auth_key)
 
-    session_key = await auth()
+    if not session_key:
+        return
 
-    session = MiraiSession(api_root, session_key, qq)
+    session = MiraiSession(api_root=api_root,
+                           auth_key=auth_key,
+                           session_key=session_key,
+                           qq=qq)
     if await session._api.verify(qq=qq):
         return session

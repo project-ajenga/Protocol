@@ -1,17 +1,32 @@
 import asyncio
-import functools
-from typing import Callable, Awaitable, Union, Any
+import base64
 import json
+from functools import wraps
+from typing import List
+
 import aiocqhttp
 import aiocqhttp.api
-from aiocqhttp import CQHttp, message as cq_message
+from aiocqhttp import CQHttp
+from aiocqhttp import message as cq_message
 
+import ajenga.message as raw_message
+from ajenga.event import FriendMessageEvent
+from ajenga.event import GroupMessageEvent
+from ajenga.event import GroupMuteEvent
+from ajenga.event import GroupPermission
+from ajenga.event import GroupUnmuteEvent
+from ajenga.event import Sender
+from ajenga.event import TempMessageEvent
 from ajenga.log import logger
-import ajenga.models.message as raw_message
-from ajenga.models.message import MessageChain, MessageElement, Message_T
-from ajenga.models.event_impl import MessageEvent, GroupPermission, Sender, \
-    GroupMuteEvent, GroupRecallEvent, GroupUnmuteEvent, GroupMessageEvent, FriendMessageEvent, TempMessageEvent
+from ajenga.message import MessageChain
+from ajenga.message import MessageElement
+from ajenga.message import Message_T
+from ajenga.models import Group
+from ajenga.models import GroupMember
 from ajenga.protocol import Api
+from ajenga.protocol import ApiResult
+from ajenga.protocol import Code
+from ajenga.protocol import MessageSendResult
 from ajenga_app import BotSession
 
 logger = logger.getChild('cqhttp-protocol')
@@ -21,6 +36,12 @@ class Image(raw_message.Image):
     def __init__(self, *, url=None, content=None, file=None):
         super(Image, self).__init__(url=url, content=content)
         self.file = file
+        if not self.url and not self.file and self.content:
+            self.url = self.base64()
+
+    def base64(self) -> str:
+        base64_str = base64.b64encode(self.content).decode()
+        return 'base64://' + base64_str
 
     def raw(self) -> "MessageElement":
         return raw_message.Image(url=self.url, content=self.content)
@@ -30,14 +51,21 @@ class Voice(raw_message.Voice):
     def __init__(self, *, url=None, content=None, file=None):
         super(Voice, self).__init__(url=url, content=content)
         self.file = file
-        # if self.file and not self.url and not self.content:
-            # self._task = asyncio.create_task(self._prepare())
-    #
-    # async def _prepare(self):
-    #     url =
 
     def raw(self) -> "MessageElement":
         return raw_message.Image(url=self.url, content=self.content)
+
+
+def _catch(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as e:
+            logger.exception(e)
+            return ApiResult(Code.Unspecified, message=str(e))
+
+    return wrapper
 
 
 class CQSession(BotSession, Api):
@@ -87,16 +115,66 @@ class CQSession(BotSession, Api):
 
     #
 
+    @_catch
     async def send_group_message(self, group: int, message: Message_T):
-        return await self._api.send_group_msg(group_id=group, message=self.as_cq_chain(message))
+        message = await self.prepare_message(message)
+        res: dict = await self._api.send_group_msg(group_id=group, message=self.as_cq_chain(message))
+        return ApiResult(Code.Success, MessageSendResult(res['message_id']))
 
+    @_catch
     async def send_friend_message(self, qq: int, message: Message_T):
-        return await self._api.send_private_msg(user_id=qq, message=self.as_cq_chain(message))
+        message = await self.prepare_message(message)
+        res: dict = await self._api.send_private_msg(user_id=qq, message=self.as_cq_chain(message))
+        return ApiResult(Code.Success, MessageSendResult(res['message_id']))
 
+    @_catch
     async def send_temp_message(self, qq: int, group: int, message: Message_T):
-        return await self._api.send_private_msg(user_id=qq, message=self.as_cq_chain(message))
+        message = await self.prepare_message(message)
+        res: dict = await self._api.send_private_msg(user_id=qq, message=self.as_cq_chain(message))
+        return ApiResult(Code.Success, MessageSendResult(res['message_id']))
+
+    @_catch
+    async def recall(self, message_id: raw_message.MessageIdType) -> ApiResult[None]:
+        res: dict = await self._api.delete_msg(message_id=message_id)
+        return ApiResult(Code.Success)
+
+    @_catch
+    async def get_group_list(self) -> ApiResult[List[Group]]:
+        res = await self._api.get_group_list()
+        groups = []
+        for g in res:
+            groups.append(Group(
+                id_=g.get('group_id'),
+                name=g.get('group_name'),
+                permission=GroupPermission.NONE,
+            ))
+        return ApiResult(Code.Success, groups)
+
+    @_catch
+    async def get_group_member_list(self, group: int) -> ApiResult[List[GroupMember]]:
+        res = await self._api.get_group_member_list(group_id=group)
+        members = []
+        for member in res:
+            members.append(GroupMember(
+                id_=member.get('user_id'),
+                name=member.get('nickname'),
+                permission=self._role_to_permission[member.get('role')],
+            ))
+        return ApiResult(Code.Success, members)
+
+    @_catch
+    async def get_group_member_info(self, group: int, qq: int) -> ApiResult[GroupMember]:
+        res = await self._api.get_group_member_info(group_id=group, user_id=qq)
+        return ApiResult(Code.Success, GroupMember(
+            id_=res.get('user_id'),
+            name=res.get('nickname'),
+            permission=self._role_to_permission[res.get('role')],
+        ))
 
     #
+
+    async def prepare_message(self, message: Message_T) -> MessageChain:
+        return MessageChain(message).to(self)
 
     def as_cq_el(self, message: MessageElement) -> cq_message.MessageSegment:
         if isinstance(message, raw_message.Plain):
@@ -128,7 +206,7 @@ class CQSession(BotSession, Api):
         if type_ == 'text':
             ret = raw_message.Plain(data['text'])
         elif type_ == 'face':
-            ret = raw_message.Face(int(data['id_']))
+            ret = raw_message.Face(int(data['id']))
         elif type_ == 'image':
             ret = Image(url=data['url'], file=data['file'])
         elif type_ == 'at':
@@ -172,9 +250,20 @@ class CQSession(BotSession, Api):
                     ),
                 )
                 return event
-            elif cq_event.detail_type == 'friend':
+            elif cq_event.detail_type == 'private' and cq_event.sub_type == 'friend':
                 msg = self.as_message_chain(cq_event.message)
                 event = FriendMessageEvent(
+                    message=msg,
+                    message_id=cq_event.message_id,
+                    sender=Sender(
+                        qq=cq_event.sender['user_id'],
+                        name=cq_event.sender.get('nickname'),
+                    ),
+                )
+                return event
+            elif cq_event.detail_type == 'private' and cq_event.sub_type == 'group':
+                msg = self.as_message_chain(cq_event.message)
+                event = TempMessageEvent(
                     message=msg,
                     message_id=cq_event.message_id,
                     sender=Sender(
