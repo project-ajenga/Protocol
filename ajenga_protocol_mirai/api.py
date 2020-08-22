@@ -11,11 +11,6 @@ import aiohttp
 
 from ajenga.protocol.api import Code
 
-try:
-    import ujson as json
-except ImportError:
-    import json
-
 from . import logger
 
 
