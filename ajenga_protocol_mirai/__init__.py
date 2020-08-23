@@ -1,6 +1,8 @@
 import asyncio
 import contextvars
 import json
+from dataclasses import dataclass
+from dataclasses import field
 from functools import wraps
 from typing import List
 from typing import Optional
@@ -22,9 +24,12 @@ from ajenga.event import GroupUnmuteEvent
 from ajenga.event import Sender
 from ajenga.event import TempMessageEvent
 from ajenga.log import logger
+from ajenga.message import ImageIdType
 from ajenga.message import MessageChain
 from ajenga.message import MessageElement
+from ajenga.message import MessageIdType
 from ajenga.message import Message_T
+from ajenga.message import VoiceIdType
 from ajenga.models import Group
 from ajenga.models import GroupMember
 from ajenga.protocol import Api
@@ -32,6 +37,7 @@ from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
 from ajenga_app import BotSession
+from ajenga_app import app
 from .api import ApiError
 
 logger = logger.getChild('mirai-protocol')
@@ -44,26 +50,26 @@ METHOD_FRIEND = 'friend'
 METHOD_TEMP = 'temp'
 
 
+@dataclass
 class Source(raw_message.Meta):
-    def __init__(self, id_):
-        super(Source, self).__init__()
-        self.id_ = id_
+    id: MessageIdType
+
+    def raw(self) -> Optional[MessageElement]:
+        return None
 
 
+@dataclass
 class Image(raw_message.Image):
-    def __init__(self, *,
-                 url: str = None,
-                 content: bytes = None,
-                 id_: str = None,
-                 type_: str = None):
-        super(Image, self).__init__(url=url, content=content)
-        self.type_ = type_ or upload_method.get()
-        self.id_ = id_
-        if self.id_:
-            ind_start = self.id_.index('{') + 1
-            ind_end = self.id_.index('}')
-            self.hash_ = id_[ind_start:ind_end].replace('-', '').lower()
-        if not id_ and type_:
+    id: ImageIdType = None
+    method: str = field(default_factory=upload_method.get)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.id:
+            ind_start = self.id.index('{') + 1
+            ind_end = self.id.index('}')
+            self.hash = self.id[ind_start:ind_end].replace('-', '').lower()
+        if not self.id and self.method:
             self.task = asyncio.create_task(self._prepare())
         else:
             self.task = None
@@ -78,48 +84,45 @@ class Image(raw_message.Image):
             else:
                 async with aiohttp.request("GET", self.url) as resp:
                     self.content = await resp.content.read()
-        img = await self.referer._upload_image(self.type_, self.content, f'{self.hash_}.png')
+        bot = app.get_session(self.referer)
+        img = await bot._upload_image(self.method, self.content, f'{self.hash}.png')
         logger.debug(f'Got resp !  {img}')
-        self.id_ = img.id_
+        self.id = img.id
 
-    async def prepare(self, type_=None):
-        if self.id_:
+    async def prepare(self, method=None):
+        if self.id:
             return
-        elif type_ and type_ != self.type_:
+        elif method and method != self.method:
             if self.task:
-                logger.warning(f"Unused image upload cache {self.type_} {type_}")
-            self.type_ = type_
+                logger.warning(f"Unused image upload cache {self.method} {method}")
+            self.method = method
             return await self._prepare()
         elif self.task:
             await self.task
         else:
             raise ValueError("No upload method specified for Image!")
 
-    def raw(self) -> "MessageElement":
-        return raw_message.Image(url=self.url, content=self.content, hash_=self.hash_)
+    def raw(self) -> Optional[MessageElement]:
+        return raw_message.Image(url=self.url, content=self.content, hash=self.hash)
 
     def __eq__(self, other):
-        return (isinstance(other, Image) and self.id_ == other.id_) or super(Image, self).__eq__(other)
+        return (isinstance(other, Image) and self.id == other.id) or super(Image, self).__eq__(other)
 
 
+@dataclass
 class Voice(raw_message.Voice):
-    def __init__(self, *,
-                 url: str = None,
-                 content: bytes = None,
-                 id_: str = None,
-                 type_=None):
-        super().__init__(url, content)
-        self.id_ = id_
-        if self.id_:
-            self.hash_ = id_[:self.id_.find('.')].lower()
+    id: VoiceIdType = None
+    method: str = field(default_factory=upload_method.get)
+
+    def __post_init__(self):
+        if self.id:
+            self.hash = self.id[:self.id.find('.')].lower()
 
 
+@dataclass
 class Quote(raw_message.Quote):
-    def __init__(self, id_, origin):
-        super(Quote, self).__init__(id_=id_, origin=origin)
-
-    def raw(self) -> "MessageElement":
-        return raw_message.Quote(id_=self.id_)
+    def raw(self) -> Optional[MessageElement]:
+        return raw_message.Quote(id=self.id)
 
 
 def _catch(func):
@@ -170,15 +173,15 @@ class MiraiSession(BotSession, Api):
         return self
 
     def wrap_message(self, message: MessageElement, method=None) -> MessageElement:
-        if message.referer == self:
+        if message.referer == self.qq:
             return message
         message = message.raw()
         if isinstance(message, raw_message.Image):
-            message2 = Image(url=message.url, content=message.content, type_=method)
-            message2.referer = self
+            message2 = Image(url=message.url, content=message.content, method=method)
+            message2.referer = self.qq
             return message2
         else:
-            message.referer = self
+            message.referer = self.qq
             return message
 
     # Implement abstract function for Api
@@ -190,7 +193,7 @@ class MiraiSession(BotSession, Api):
         if quote := msg.get_first(Quote):
             msg.remove(quote)
             res: dict = await self._api.sendGroupMessage(group=group, messageChain=self.as_mirai_chain(msg),
-                                                         quote=quote.id_)
+                                                         quote=quote.id)
         else:
             res: dict = await self._api.sendGroupMessage(group=group, messageChain=self.as_mirai_chain(msg))
         upload_method.reset(token)
@@ -223,7 +226,7 @@ class MiraiSession(BotSession, Api):
         groups = []
         for g in res:
             groups.append(Group(
-                id_=g.get('id'),
+                id=g.get('id'),
                 name=g.get('name'),
                 permission=self._role_to_permission[g.get('permission')],
             ))
@@ -235,7 +238,7 @@ class MiraiSession(BotSession, Api):
         members = []
         for member in res:
             members.append(GroupMember(
-                id_=member.get('id'),
+                id=member.get('id'),
                 name=member.get('memberName'),
                 permission=self._role_to_permission[member.get('permission')],
             ))
@@ -245,25 +248,25 @@ class MiraiSession(BotSession, Api):
     async def get_group_member_info(self, group: int, qq: int) -> ApiResult[GroupMember]:
         res = await self._api.memberInfo(target=group, memberId=qq, request_method='get')
         return ApiResult(Code.Success, GroupMember(
-            id_=res.get('id'),
+            id=res.get('id'),
             name=res.get('memberName'),
             permission=self._role_to_permission[res.get('permission')],
         ))
 
     # Message Utils
 
-    async def _upload_image(self, type_, img: bytes, name: str):
+    async def _upload_image(self, method, img: bytes, name: str):
         # return await self.call_action_(action="uploadImage", type=type_, img=img)
-        res = await self._api.upload_image(filedata=img, filename=name, type=type_)
-        img_msg = Image(url=res['url'], id_=res['imageId'], type_=type_)
-        img_msg.referer = self
+        res = await self._api.upload_image(filedata=img, filename=name, type=method)
+        img_msg = Image(url=res['url'], id=res['imageId'], method=method)
+        img_msg.referer = self.qq
         return img_msg
 
-    async def _upload_record(self, type_, voice: bytes, name: str):
+    async def _upload_record(self, method, voice: bytes, name: str):
         # return await self.call_action_(action="uploadImage", type=type_, img=img)
-        res = await self._api.upload_voice(filedata=voice, filename=name, type=type_)
-        voice_msg = Voice(id_=res['voiceId'], type_=type_)
-        voice_msg.referer = self
+        res = await self._api.upload_voice(filedata=voice, filename=name, type=method)
+        voice_msg = Voice(id=res['voiceId'], method=method)
+        voice_msg.referer = self.qq
         return voice_msg
 
     # Message Transition
@@ -272,26 +275,26 @@ class MiraiSession(BotSession, Api):
         # print(msg)
         type_: str = msg['type']
         if type_ == 'Source':
-            ret = Source(id_=msg['id'])
+            ret = Source(id=msg['id'])
         elif type_ == 'Plain':
             ret = raw_message.Plain(text=msg['text'])
         elif type_ == 'Quote':
-            ret = Quote(id_=msg['id'], origin=self.as_message_chain(msg['origin']))
+            ret = Quote(id=msg['id'], origin=self.as_message_chain(msg['origin']))
         elif type_ == 'At':
-            ret = raw_message.At(qq=msg['target'])
+            ret = raw_message.At(msg['target'])
         elif type_ == 'AtAll':
             ret = raw_message.AtAll()
         elif type_ == 'Face':
-            ret = raw_message.Face(id_=msg['faceId'])
+            ret = raw_message.Face(msg['faceId'])
         elif type_ == 'Image':
-            ret = Image(url=msg['url'], id_=msg['imageId'])
+            ret = Image(url=msg['url'], id=msg['imageId'])
         elif type_ == 'Voice':
-            ret = Voice(url=msg['url'], id_=msg['voiceId'])
+            ret = Voice(url=msg['url'], id=msg['voiceId'])
         elif type_ == 'App':
             ret = raw_message.App(content=json.loads(msg['content']))
         else:
             ret = raw_message.Unknown()
-        ret.referer = self
+        ret.referer = self.qq
         return ret
 
     def as_mirai_el(self, msg: MessageElement) -> dict:
@@ -312,17 +315,17 @@ class MiraiSession(BotSession, Api):
         elif isinstance(msg, Image):
             return {
                 'type': 'Image',
-                'imageId': msg.id_,
+                'imageId': msg.id,
             }
         elif isinstance(msg, raw_message.Face):
             return {
                 'type': 'Face',
-                'faceId': msg.id_,
+                'faceId': msg.id,
             }
         elif isinstance(msg, Voice):
             return {
                 'type': 'Voice',
-                'voiceId': msg.id_,
+                'voiceId': msg.id,
             }
         elif isinstance(msg, raw_message.Voice):
             return {
@@ -353,7 +356,7 @@ class MiraiSession(BotSession, Api):
             msg = self.as_message_chain(mi_event['messageChain'])
             event = GroupMessageEvent(
                 message=msg,
-                message_id=msg[0].id_,
+                message_id=msg[0].id,
                 group=mi_event['sender']['group']['id'],
                 sender=Sender(
                     qq=mi_event['sender']['id'],
@@ -370,7 +373,7 @@ class MiraiSession(BotSession, Api):
             msg = self.as_message_chain(mi_event['messageChain'])
             event = FriendMessageEvent(
                 message=msg,
-                message_id=msg[0].id_,
+                message_id=msg[0].id,
                 sender=Sender(
                     qq=mi_event['sender']['id'],
                     name=mi_event['sender']['nickname'],
@@ -385,7 +388,7 @@ class MiraiSession(BotSession, Api):
             msg = self.as_message_chain(mi_event['messageChain'])
             event = TempMessageEvent(
                 message=msg,
-                message_id=msg[0].id_,
+                message_id=msg[0].id,
                 sender=Sender(
                     qq=mi_event['sender']['id'],
                     name=mi_event['sender']['memberName'],
@@ -440,7 +443,7 @@ class MiraiSession(BotSession, Api):
         # print('send now: ', raw_message)
         for msg in message:
             if isinstance(msg, Image):
-                await msg.prepare(type_=upload_method.get())
+                await msg.prepare(method=upload_method.get())
         # logger.debug(f'send now:  {raw_message}')
         return message
 
