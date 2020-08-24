@@ -292,6 +292,8 @@ class MiraiSession(BotSession, Api):
             ret = Voice(url=msg['url'], id=msg['voiceId'])
         elif type_ == 'App':
             ret = raw_message.App(content=json.loads(msg['content']))
+        elif type_ == 'Xml':
+            ret = raw_message.Xml(content=msg['xml'])
         else:
             ret = raw_message.Unknown()
         ret.referer = self.qq
@@ -330,7 +332,17 @@ class MiraiSession(BotSession, Api):
         elif isinstance(msg, raw_message.Voice):
             return {
                 'type': 'Voice',
-                'url': msg.url
+                'url': msg.url,
+            }
+        elif isinstance(msg, raw_message.App):
+            return {
+                'type': 'App',
+                'content': json.dumps(msg.content),
+            }
+        elif isinstance(msg, raw_message.Xml):
+            return {
+                'type': 'Xml',
+                'xml': msg.content,
             }
         else:
             # print('???? ', msg)
