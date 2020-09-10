@@ -253,6 +253,23 @@ class MiraiSession(BotSession, Api):
             permission=self._role_to_permission[res.get('permission')],
         ))
 
+    @_catch
+    async def set_group_mute(self, group: int, qq: Optional[int], duration: Optional[int]) -> ApiResult[None]:
+        if qq:
+            res = await self._api.mute(target=group, memberId=qq, time=duration, request_method='post')
+            return ApiResult(res.get('code'))
+        else:
+            res = await self._api.muteAll(target=group, request_method='post')
+            return ApiResult(res.get('code'))
+
+    @_catch
+    async def set_group_unmute(self, group: int, qq: Optional[int]) -> ApiResult[None]:
+        if qq:
+            res = await self._api.unmute(target=group, memberId=qq, request_method='post')
+            return ApiResult(res.get('code'))
+        else:
+            res = await self._api.muteAll(target=group, request_method='post')
+            return ApiResult(res.get('code'))
     # Message Utils
 
     async def _upload_image(self, method, img: bytes, name: str):

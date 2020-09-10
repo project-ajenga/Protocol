@@ -61,7 +61,7 @@ class Voice(raw_message.Voice):
     file: str = None
 
     def raw(self) -> "MessageElement":
-        return raw_message.Image(url=self.url, content=self.content)
+        return raw_message.Voice(url=self.url, content=self.content)
 
 
 @dataclass
