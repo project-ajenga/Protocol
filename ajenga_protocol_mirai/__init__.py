@@ -65,10 +65,13 @@ class Image(raw_message.Image):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.id:
+        if self.id and self.method == METHOD_GROUP:
             ind_start = self.id.index('{') + 1
             ind_end = self.id.index('}')
             self.hash = self.id[ind_start:ind_end].replace('-', '').lower()
+        elif self.id and self.method == METHOD_FRIEND:
+            ind_start = self.id.rfind('-') + 1
+            self.hash = self.id[ind_start:].lower()
         if not self.id and self.method:
             self.task = asyncio.create_task(self._prepare())
         else:
@@ -80,10 +83,10 @@ class Image(raw_message.Image):
             url = urlparse(self.url)
             if url.scheme == 'file':
                 async with aiofiles.open(url2pathname(url.path), 'rb') as f:
-                    self.content = await f.read()
+                    self.set_content(await f.read())
             else:
                 async with aiohttp.request("GET", self.url) as resp:
-                    self.content = await resp.content.read()
+                    self.set_content(await resp.content.read())
         bot = app.get_session(self.referer)
         img = await bot._upload_image(self.method, self.content, f'{self.hash}.png')
         logger.debug(f'Got resp !  {img}')
@@ -112,11 +115,27 @@ class Image(raw_message.Image):
 @dataclass
 class Voice(raw_message.Voice):
     id: VoiceIdType = None
+    json: str = None
     method: str = field(default_factory=upload_method.get)
 
     def __post_init__(self):
         if self.id:
             self.hash = self.id[:self.id.find('.')].lower()
+        if self.url:
+            self.url = self.convert_url(self.url, 0, 1) or self.url
+
+    @staticmethod
+    def convert_url(url: str, old: int, new: int):
+        if url.find(f'voice_codec={old}') == -1:
+            return
+        url = url.replace(f'voice_codec={old}', f'voice_codec={new}')
+        lurl = list(url)
+        lurl[url.index('&filetype') - 5] = hex(int(lurl[url.index('&filetype') - 5], base=16) + new - old)[2:]
+        t = int(url[url.index('rkey=') + 133:url.index('rkey=') + 135], base=16) - new + old
+        lurl[url.index('rkey=') + 133:url.index('rkey=') + 135] = f"{t:02x}"
+
+        url = ''.join(lurl)
+        return url
 
 
 @dataclass
@@ -134,12 +153,9 @@ def _catch(func):
             except ApiError as e:
                 if e.code == ApiError.CODE_SESSION_FAILED:
                     logger.info('Re-login Mirai')
-                    new_session_key = await auth(api_root=self._api_root,
-                                                 auth_key=self._auth_key)
-                    if not new_session_key:
-                        return ApiResult(Code.Unavailable)
 
-                    self._api.update_session(new_session_key)
+                    if not await self.relogin():
+                        return ApiResult(Code.Unavailable)
 
                     if await self._api.verify(qq=self.qq):
                         logger.info('Re-login Success')
@@ -160,6 +176,8 @@ class MiraiSession(BotSession, Api):
         self._qq = qq
         self._api_root = api_root
         self._auth_key = auth_key
+        self._ws_on = False
+        self._session_key = session_key
         self._api = api.HttpApi(api_root, session_key, 30)
 
     @property
@@ -306,7 +324,7 @@ class MiraiSession(BotSession, Api):
         elif type_ == 'Image':
             ret = Image(url=msg['url'], id=msg['imageId'])
         elif type_ == 'Voice':
-            ret = Voice(url=msg['url'], id=msg['voiceId'])
+            ret = Voice(url=msg['url'], id=msg['voiceId'], json=msg['json'])
         elif type_ == 'App':
             ret = raw_message.App(content=json.loads(msg['content']))
         elif type_ == 'Xml':
@@ -345,6 +363,7 @@ class MiraiSession(BotSession, Api):
             return {
                 'type': 'Voice',
                 'voiceId': msg.id,
+                'json': msg.json,
             }
         elif isinstance(msg, raw_message.Voice):
             return {
@@ -476,6 +495,27 @@ class MiraiSession(BotSession, Api):
         # logger.debug(f'send now:  {raw_message}')
         return message
 
+    async def relogin(self, sleep=3, retries=None):
+        _retries = 0
+        while not retries or _retries < retries:
+            _retries += 1
+            try:
+                new_session_key = await auth(api_root=self._api_root,
+                                             auth_key=self._auth_key)
+                if not new_session_key:
+                    return False
+
+                self._session_key = new_session_key
+                self._api.update_session(new_session_key)
+
+                if await self._api.verify(qq=self.qq):
+                    asyncio.create_task(self.set_report_ws(self._ws_on))
+                    return True
+                return False
+            except Exception as e:
+                logger.exception(e)
+                await asyncio.sleep(sleep)
+
     def set_report(self, report_path: str, **kwargs):
         self._server_app = Quart('')
 
@@ -489,7 +529,33 @@ class MiraiSession(BotSession, Api):
 
             return {'code': 0}
 
-        return asyncio.create_task(self._server_app.run_task(use_reloader=False, **kwargs))
+        return self._server_app.run_task(use_reloader=False, **kwargs)
+
+    def set_report_ws(self, on: bool, **kwargs):
+        async def _ws():
+            async with aiohttp.ClientSession() as client:
+                async with client.ws_connect(f"{self._api_root}all/?sessionKey={self._session_key}", **kwargs) as ws:
+                    while True:
+                        try:
+                            event = await ws.receive_json()
+                        except TypeError:
+                            if ws.closed:
+                                logger.error('Websocket closed, try relogin')
+                                await self.relogin()
+                                return
+                            logger.error(f"TypeError in parsing ws event")
+                            continue
+                        if not event:
+                            continue
+                        logger.debug(event)
+                        if event := self.as_event(event):
+                            self.handle_event_nowait(event)
+
+        if not on:
+            return
+
+        self._ws_on = True
+        return _ws()
 
 
 async def auth(api_root, auth_key):
