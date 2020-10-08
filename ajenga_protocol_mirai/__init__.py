@@ -21,6 +21,7 @@ from ajenga.event import GroupMuteEvent
 from ajenga.event import GroupPermission
 from ajenga.event import GroupRecallEvent
 from ajenga.event import GroupUnmuteEvent
+from ajenga.event import MessageEvent
 from ajenga.event import Sender
 from ajenga.event import TempMessageEvent
 from ajenga.log import logger
@@ -30,6 +31,8 @@ from ajenga.message import MessageElement
 from ajenga.message import MessageIdType
 from ajenga.message import Message_T
 from ajenga.message import VoiceIdType
+from ajenga.models import ContactIdType
+from ajenga.models import Friend
 from ajenga.models import Group
 from ajenga.models import GroupMember
 from ajenga.protocol import Api
@@ -87,7 +90,7 @@ class Image(raw_message.Image):
             else:
                 async with aiohttp.request("GET", self.url) as resp:
                     self.set_content(await resp.content.read())
-        bot = app.get_session(self.referer)
+        bot: Optional[MiraiSession] = app.get_session(self.referer)
         img = await bot._upload_image(self.method, self.content, f'{self.hash}.png')
         logger.debug(f'Got resp !  {img}')
         self.id = img.id
@@ -115,7 +118,7 @@ class Image(raw_message.Image):
 @dataclass
 class Voice(raw_message.Voice):
     id: VoiceIdType = None
-    json: str = None
+    # json: str = None
     method: str = field(default_factory=upload_method.get)
 
     def __post_init__(self):
@@ -172,6 +175,7 @@ def _catch(func):
 
 
 class MiraiSession(BotSession, Api):
+
     def __init__(self, api_root, auth_key, session_key, qq):
         self._qq = qq
         self._api_root = api_root
@@ -205,7 +209,10 @@ class MiraiSession(BotSession, Api):
     # Implement abstract function for Api
 
     @_catch
-    async def send_group_message(self, group: int, message: Message_T) -> ApiResult[MessageSendResult]:
+    async def send_group_message(self,
+                                 group: ContactIdType,
+                                 message: Message_T,
+                                 ) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_GROUP)
         msg = await self.prepare_message(message)
         if quote := msg.get_first(Quote):
@@ -218,7 +225,10 @@ class MiraiSession(BotSession, Api):
         return ApiResult(res.get('code'), MessageSendResult(res.get('messageId')))
 
     @_catch
-    async def send_friend_message(self, qq: int, message: Message_T) -> ApiResult[MessageSendResult]:
+    async def send_friend_message(self,
+                                  qq: ContactIdType,
+                                  message: Message_T,
+                                  ) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_FRIEND)
         msg = await self.prepare_message(message)
         res: dict = await self._api.sendFriendMessage(qq=qq, messageChain=self.as_mirai_chain(msg))
@@ -226,7 +236,11 @@ class MiraiSession(BotSession, Api):
         return ApiResult(res.get('code'), MessageSendResult(res.get('messageId')))
 
     @_catch
-    async def send_temp_message(self, qq: int, group: int, message: Message_T) -> ApiResult[MessageSendResult]:
+    async def send_temp_message(self,
+                                qq: ContactIdType,
+                                group: ContactIdType,
+                                message: Message_T,
+                                ) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_TEMP)
         msg = await self.prepare_message(message)
         res: dict = await self._api.sendTempMessage(qq=qq, group=group, messageChain=self.as_mirai_chain(msg))
@@ -234,9 +248,21 @@ class MiraiSession(BotSession, Api):
         return ApiResult(res.get('code'), MessageSendResult(res.get('messageId')))
 
     @_catch
-    async def recall(self, message_id: raw_message.MessageIdType) -> ApiResult[None]:
+    async def recall(self,
+                     message_id: MessageIdType,
+                     ) -> ApiResult[None]:
         res: dict = await self._api.recall(target=message_id)
         return ApiResult(res.get('code'))
+
+    @_catch
+    async def get_message(self,
+                          message_id: MessageIdType,
+                          ) -> ApiResult[MessageEvent]:
+        res: dict = await self._api.messageFromId(id=message_id, request_method='get')
+        if res.get('code') == 0:
+            return ApiResult(Code.Success, self.as_event(res['data']))
+        else:
+            return ApiResult(res.get('code'))
 
     @_catch
     async def get_group_list(self) -> ApiResult[List[Group]]:
@@ -251,7 +277,9 @@ class MiraiSession(BotSession, Api):
         return ApiResult(Code.Success, groups)
 
     @_catch
-    async def get_group_member_list(self, group: int) -> ApiResult[List[GroupMember]]:
+    async def get_group_member_list(self,
+                                    group: ContactIdType,
+                                    ) -> ApiResult[List[GroupMember]]:
         res = await self._api.memberList(target=group, request_method='get')
         members = []
         for member in res:
@@ -263,7 +291,10 @@ class MiraiSession(BotSession, Api):
         return ApiResult(Code.Success, members)
 
     @_catch
-    async def get_group_member_info(self, group: int, qq: int) -> ApiResult[GroupMember]:
+    async def get_group_member_info(self,
+                                    group: ContactIdType,
+                                    qq: ContactIdType,
+                                    ) -> ApiResult[GroupMember]:
         res = await self._api.memberInfo(target=group, memberId=qq, request_method='get')
         return ApiResult(Code.Success, GroupMember(
             id=res.get('id'),
@@ -272,7 +303,11 @@ class MiraiSession(BotSession, Api):
         ))
 
     @_catch
-    async def set_group_mute(self, group: int, qq: Optional[int], duration: Optional[int]) -> ApiResult[None]:
+    async def set_group_mute(self,
+                             group: ContactIdType,
+                             qq: Optional[ContactIdType],
+                             duration: Optional[int] = None,
+                             ) -> ApiResult[None]:
         if qq:
             res = await self._api.mute(target=group, memberId=qq, time=duration, request_method='post')
             return ApiResult(res.get('code'))
@@ -281,13 +316,29 @@ class MiraiSession(BotSession, Api):
             return ApiResult(res.get('code'))
 
     @_catch
-    async def set_group_unmute(self, group: int, qq: Optional[int]) -> ApiResult[None]:
+    async def set_group_unmute(self,
+                               group: ContactIdType,
+                               qq: Optional[ContactIdType],
+                               ) -> ApiResult[None]:
         if qq:
             res = await self._api.unmute(target=group, memberId=qq, request_method='post')
             return ApiResult(res.get('code'))
         else:
             res = await self._api.muteAll(target=group, request_method='post')
             return ApiResult(res.get('code'))
+
+    @_catch
+    async def get_friend_list(self) -> ApiResult[List[Friend]]:
+        res = await self._api.friendList(request_method='get')
+        friends = []
+        for friend in res:
+            friends.append(Friend(
+                id=friend.get('id'),
+                name=friend.get('nickname'),
+                remark=friend.get('remark'),
+            ))
+        return ApiResult(Code.Success, friends)
+
     # Message Utils
 
     async def _upload_image(self, method, img: bytes, name: str):
@@ -297,7 +348,7 @@ class MiraiSession(BotSession, Api):
         img_msg.referer = self.qq
         return img_msg
 
-    async def _upload_record(self, method, voice: bytes, name: str):
+    async def _upload_voice(self, method, voice: bytes, name: str):
         # return await self.call_action_(action="uploadImage", type=type_, img=img)
         res = await self._api.upload_voice(filedata=voice, filename=name, type=method)
         voice_msg = Voice(id=res['voiceId'], method=method)
@@ -324,12 +375,13 @@ class MiraiSession(BotSession, Api):
         elif type_ == 'Image':
             ret = Image(url=msg['url'], id=msg['imageId'])
         elif type_ == 'Voice':
-            ret = Voice(url=msg['url'], id=msg['voiceId'], json=msg['json'])
+            ret = Voice(url=msg['url'], id=msg['voiceId'])
         elif type_ == 'App':
             ret = raw_message.App(content=json.loads(msg['content']))
         elif type_ == 'Xml':
             ret = raw_message.Xml(content=msg['xml'])
         else:
+            logger.debug(f'Unknown message {msg} of type {type_}')
             ret = raw_message.Unknown()
         ret.referer = self.qq
         return ret
@@ -363,7 +415,7 @@ class MiraiSession(BotSession, Api):
             return {
                 'type': 'Voice',
                 'voiceId': msg.id,
-                'json': msg.json,
+                # 'json': msg.json,
             }
         elif isinstance(msg, raw_message.Voice):
             return {
@@ -381,7 +433,7 @@ class MiraiSession(BotSession, Api):
                 'xml': msg.content,
             }
         else:
-            # print('???? ', msg)
+            logger.debug(f'Unknown message {msg} of type {type(msg)}')
             return {}
 
     def as_message_chain(self, chain: list) -> MessageChain:
@@ -458,6 +510,7 @@ class MiraiSession(BotSession, Api):
             event = GroupMuteEvent(
                 qq=self.qq,
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
+                group=mi_event['group']['id'],
                 duration=mi_event['durationSeconds'],
             )
             return event
@@ -465,6 +518,7 @@ class MiraiSession(BotSession, Api):
             event = GroupMuteEvent(
                 qq=mi_event['member']['id'],
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
+                group=mi_event['group']['id'],
                 duration=mi_event['durationSeconds'],
             )
             return event
@@ -472,12 +526,14 @@ class MiraiSession(BotSession, Api):
             event = GroupUnmuteEvent(
                 qq=self.qq,
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
+                group=mi_event['group']['id'],
             )
             return event
         elif type_ == 'MemberUnmuteEvent':
             event = GroupUnmuteEvent(
                 qq=mi_event['member']['id'],
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
+                group=mi_event['group']['id'],
             )
             return event
         return None

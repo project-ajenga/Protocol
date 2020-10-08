@@ -11,19 +11,27 @@ import aiocqhttp.api
 from aiocqhttp import CQHttp
 from aiocqhttp import message as cq_message
 
+import ajenga.event as raw_event
 import ajenga.message as raw_message
 from ajenga.event import FriendMessageEvent
+from ajenga.event import FriendRecallEvent
+from ajenga.event import GroupJoinEvent
+from ajenga.event import GroupLeaveEvent
 from ajenga.event import GroupMessageEvent
 from ajenga.event import GroupMuteEvent
 from ajenga.event import GroupPermission
 from ajenga.event import GroupRecallEvent
 from ajenga.event import GroupUnmuteEvent
+from ajenga.event import MessageEvent
 from ajenga.event import Sender
 from ajenga.event import TempMessageEvent
 from ajenga.log import logger
 from ajenga.message import MessageChain
 from ajenga.message import MessageElement
+from ajenga.message import MessageIdType
 from ajenga.message import Message_T
+from ajenga.models import ContactIdType
+from ajenga.models import Friend
 from ajenga.models import Group
 from ajenga.models import GroupMember
 from ajenga.protocol import Api
@@ -31,6 +39,8 @@ from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
 from ajenga_app import BotSession
+from ajenga_app import this
+
 
 logger = logger.getChild('cqhttp-protocol')
 
@@ -70,6 +80,54 @@ class Quote(raw_message.Quote):
         return raw_message.Quote(id=self.id)
 
 
+@dataclass
+class NewFriendRequestEvent(raw_event.NewFriendRequestEvent):
+    flag: str
+
+    async def accept(self, **kwargs):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_friend_add_request(flag=self.flag, approve=True)
+
+    async def reject(self, **kwargs):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_friend_add_request(flag=self.flag, approve=False)
+
+    async def ignore(self):
+        pass
+
+
+@dataclass
+class GroupJoinRequestEvent(raw_event.GroupJoinRequestEvent):
+    flag: str
+
+    async def accept(self, **kwargs):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='add', approve=True)
+
+    async def reject(self, **kwargs):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='add', approve=False)
+
+    async def ignore(self):
+        pass
+
+
+@dataclass
+class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
+    flag: str
+
+    async def accept(self, **kwargs):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='invite', approve=True)
+
+    async def reject(self, **kwargs):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='invite', approve=False)
+
+    async def ignore(self):
+        pass
+
+
 def _catch(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
@@ -83,6 +141,7 @@ def _catch(func):
 
 
 class CQSession(BotSession, Api):
+
     _cqhttp: CQHttp
 
     def __init__(self, qq, **kwargs):
@@ -127,27 +186,47 @@ class CQSession(BotSession, Api):
     #
 
     @_catch
-    async def send_group_message(self, group: int, message: Message_T):
+    async def send_group_message(self,
+                                 group: ContactIdType,
+                                 message: Message_T,
+                                 ) -> ApiResult[MessageSendResult]:
         message = await self.prepare_message(message)
         res: dict = await self._api.send_group_msg(group_id=group, message=self.as_cq_chain(message))
         return ApiResult(Code.Success, MessageSendResult(res['message_id']))
 
     @_catch
-    async def send_friend_message(self, qq: int, message: Message_T):
+    async def send_friend_message(self,
+                                  qq: ContactIdType,
+                                  message: Message_T,
+                                  ) -> ApiResult[MessageSendResult]:
         message = await self.prepare_message(message)
         res: dict = await self._api.send_private_msg(user_id=qq, message=self.as_cq_chain(message))
         return ApiResult(Code.Success, MessageSendResult(res['message_id']))
 
     @_catch
-    async def send_temp_message(self, qq: int, group: int, message: Message_T):
+    async def send_temp_message(self,
+                                qq: ContactIdType,
+                                group: ContactIdType,
+                                message: Message_T,
+                                ) -> ApiResult[MessageSendResult]:
         message = await self.prepare_message(message)
         res: dict = await self._api.send_private_msg(user_id=qq, message=self.as_cq_chain(message))
         return ApiResult(Code.Success, MessageSendResult(res['message_id']))
 
     @_catch
-    async def recall(self, message_id: raw_message.MessageIdType) -> ApiResult[None]:
+    async def recall(self,
+                     message_id: MessageIdType,
+                     ) -> ApiResult[None]:
         res: dict = await self._api.delete_msg(message_id=message_id)
         return ApiResult(Code.Success)
+
+    # @_catch
+    # async def get_message(self,
+    #                       message_id: MessageIdType,
+    #                       ) -> ApiResult[MessageEvent]:
+    #     res: dict = await self._api.get_msg(message_id=message_id)
+    #     logger.debug(f'get message res: {res}')
+    #     return ApiResult(Code.Unavailable)
 
     @_catch
     async def get_group_list(self) -> ApiResult[List[Group]]:
@@ -162,7 +241,9 @@ class CQSession(BotSession, Api):
         return ApiResult(Code.Success, groups)
 
     @_catch
-    async def get_group_member_list(self, group: int) -> ApiResult[List[GroupMember]]:
+    async def get_group_member_list(self,
+                                    group: ContactIdType,
+                                    ) -> ApiResult[List[GroupMember]]:
         res = await self._api.get_group_member_list(group_id=group)
         members = []
         for member in res:
@@ -174,13 +255,66 @@ class CQSession(BotSession, Api):
         return ApiResult(Code.Success, members)
 
     @_catch
-    async def get_group_member_info(self, group: int, qq: int) -> ApiResult[GroupMember]:
+    async def get_group_member_info(self,
+                                    group: ContactIdType,
+                                    qq: ContactIdType,
+                                    ) -> ApiResult[GroupMember]:
         res = await self._api.get_group_member_info(group_id=group, user_id=qq)
         return ApiResult(Code.Success, GroupMember(
             id=res.get('user_id'),
             name=res.get('nickname'),
             permission=self._role_to_permission[res.get('role')],
         ))
+
+    @_catch
+    async def set_group_kick(self,
+                             group: ContactIdType,
+                             qq: ContactIdType,
+                             ) -> ApiResult[None]:
+        await self._api.set_group_kick(group_id=group, user_id=qq)
+        return ApiResult(Code.Success)
+
+    @_catch
+    async def set_group_leave(self,
+                              group: ContactIdType,
+                              ) -> ApiResult[None]:
+        await self._api.set_group_leave(group_id=group)
+        return ApiResult(Code.Success)
+
+    @_catch
+    async def set_group_mute(self,
+                             group: ContactIdType,
+                             qq: Optional[ContactIdType],
+                             duration: Optional[int] = None,
+                             ) -> ApiResult[None]:
+        if qq:
+            await self._api.set_group_ban(group_id=group, user_id=qq, duration=duration)
+        else:
+            await self._api.set_group_whole_ban(group_id=group, enable=True)
+        return ApiResult(Code.Success)
+
+    @_catch
+    async def set_group_unmute(self,
+                               group: ContactIdType,
+                               qq: Optional[ContactIdType],
+                               ) -> ApiResult[None]:
+        if qq:
+            await self._api.set_group_ban(group_id=group, user_id=qq, duration=0)
+        else:
+            await self._api.set_group_whole_ban(group_id=group, enable=False)
+        return ApiResult(Code.Success)
+
+    @_catch
+    async def get_friend_list(self) -> ApiResult[List[Friend]]:
+        res = await self._api.get_friend_list()
+        friends = []
+        for friend in res:
+            friends.append(Friend(
+                id=friend.get('user_id'),
+                name=friend.get('nickname'),
+                remark=friend.get('remark'),
+            ))
+        return ApiResult(Code.Success, friends)
 
     #
 
@@ -205,6 +339,7 @@ class CQSession(BotSession, Api):
         elif isinstance(message, raw_message.Voice):
             return cq_message.MessageSegment.record(message.url)
         else:
+            logger.debug(f'Unknown message {message} of type {type(message)}')
             return cq_message.MessageSegment.text('')
 
     def as_cq_chain(self, message: Message_T) -> str:
@@ -232,9 +367,8 @@ class CQSession(BotSession, Api):
         elif type_ == 'reply':
             ret = Quote(id=int(data['id']))
         else:
+            logger.debug(f'Unknown message {message} of type {type_}')
             ret = raw_message.Unknown()
-        # else:
-        #     return Plain(str(message))
         ret.referer = self.qq
         return ret
 
@@ -292,6 +426,7 @@ class CQSession(BotSession, Api):
                     event = GroupMuteEvent(
                         qq=cq_event.user_id,
                         operator=cq_event.operator_id,
+                        group=cq_event.group_id,
                         duration=cq_event['duration'],
                     )
                     return event
@@ -299,14 +434,59 @@ class CQSession(BotSession, Api):
                     event = GroupUnmuteEvent(
                         qq=cq_event.user_id,
                         operator=cq_event.operator_id,
+                        group=cq_event.group_id,
                     )
                     return event
             elif cq_event.detail_type == 'group_recall':
                 event = GroupRecallEvent(
                     qq=cq_event.user_id,
-                    group=cq_event.group_id,
                     operator=cq_event.operator_id,
+                    group=cq_event.group_id,
                     message_id=cq_event.message_id,
+                )
+                return event
+            elif cq_event.detail_type == 'group_increase':
+                event = GroupJoinEvent(
+                    qq=cq_event.user_id,
+                    operator=cq_event.operator_id,
+                    group=cq_event.group_id,
+                )
+                return event
+            elif cq_event.detail_type == 'group_decrease':
+                event = GroupLeaveEvent(
+                    qq=cq_event.user_id,
+                    operator=cq_event.operator_id,
+                    group=cq_event.group_id,
+                )
+                return event
+            elif cq_event.detail_type == 'friend_recall':
+                event = FriendRecallEvent(
+                    qq=cq_event.user_id,
+                    message_id=cq_event.message_id,
+                )
+                return event
+        elif cq_event.type == 'request':
+            if cq_event.detail_type == 'friend':
+                event = NewFriendRequestEvent(
+                    qq=cq_event.user_id,
+                    comment=cq_event.comment,
+                    flag=cq_event.flag,
+                )
+                return event
+            elif cq_event.detail_type == 'group' and cq_event.sub_type == 'add':
+                event = GroupJoinRequestEvent(
+                    qq=cq_event.user_id,
+                    group=cq_event.group_id,
+                    comment=cq_event.comment,
+                    flag=cq_event.flag,
+                )
+                return event
+            elif cq_event.detail_type == 'group' and cq_event.sub_type == 'invite':
+                event = GroupInvitedRequestEvent(
+                    operator=cq_event.user_id,
+                    group=cq_event.group_id,
+                    comment=cq_event.comment,
+                    flag=cq_event.flag,
                 )
                 return event
         return None
