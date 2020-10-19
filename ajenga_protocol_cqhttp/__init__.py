@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 from dataclasses import dataclass
+from dataclasses import field
 from functools import wraps
 from typing import List
 from typing import Optional
@@ -46,6 +47,12 @@ logger = logger.getChild('cqhttp-protocol')
 
 
 @dataclass
+class Raw(raw_message.Meta):
+    type: str = 'raw'
+    data: dict = field(default_factory=dict)
+
+
+@dataclass
 class Image(raw_message.Image):
     file: str = None
 
@@ -80,54 +87,6 @@ class Quote(raw_message.Quote):
         return raw_message.Quote(id=self.id)
 
 
-@dataclass
-class NewFriendRequestEvent(raw_event.NewFriendRequestEvent):
-    flag: str
-
-    async def accept(self, **kwargs):
-        session: CQSession = this.bot
-        await session._cqhttp.api.set_friend_add_request(flag=self.flag, approve=True)
-
-    async def reject(self, **kwargs):
-        session: CQSession = this.bot
-        await session._cqhttp.api.set_friend_add_request(flag=self.flag, approve=False)
-
-    async def ignore(self):
-        pass
-
-
-@dataclass
-class GroupJoinRequestEvent(raw_event.GroupJoinRequestEvent):
-    flag: str
-
-    async def accept(self, **kwargs):
-        session: CQSession = this.bot
-        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='add', approve=True)
-
-    async def reject(self, **kwargs):
-        session: CQSession = this.bot
-        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='add', approve=False)
-
-    async def ignore(self):
-        pass
-
-
-@dataclass
-class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
-    flag: str
-
-    async def accept(self, **kwargs):
-        session: CQSession = this.bot
-        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='invite', approve=True)
-
-    async def reject(self, **kwargs):
-        session: CQSession = this.bot
-        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='invite', approve=False)
-
-    async def ignore(self):
-        pass
-
-
 def _catch(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
@@ -138,6 +97,63 @@ def _catch(func):
             return ApiResult(Code.Unspecified, message=str(e))
 
     return wrapper
+
+
+@dataclass
+class FriendAddRequestEvent(raw_event.FriendAddRequestEvent):
+    flag: str
+
+    @_catch
+    async def _reply(self, approve: bool):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_friend_add_request(flag=self.flag, approve=approve)
+
+    async def accept(self, **kwargs):
+        return await self._reply(True)
+
+    async def reject(self, **kwargs):
+        return await self._reply(False)
+
+    async def ignore(self):
+        pass
+
+
+@dataclass
+class GroupJoinRequestEvent(raw_event.GroupJoinRequestEvent):
+    flag: str
+
+    @_catch
+    async def _reply(self, approve: bool):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='add', approve=approve)
+
+    async def accept(self, **kwargs):
+        return await self._reply(True)
+
+    async def reject(self, **kwargs):
+        return await self._reply(False)
+
+    async def ignore(self):
+        pass
+
+
+@dataclass
+class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
+    flag: str
+
+    @_catch
+    async def _reply(self, approve: bool):
+        session: CQSession = this.bot
+        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='invite', approve=approve)
+
+    async def accept(self, **kwargs):
+        return await self._reply(True)
+
+    async def reject(self, **kwargs):
+        return await self._reply(False)
+
+    async def ignore(self):
+        pass
 
 
 class CQSession(BotSession, Api):
@@ -322,7 +338,9 @@ class CQSession(BotSession, Api):
         return MessageChain(message).to(self)
 
     def as_cq_el(self, message: MessageElement) -> cq_message.MessageSegment:
-        if isinstance(message, raw_message.Plain):
+        if isinstance(message, Raw):
+            return cq_message.MessageSegment(type_=message.type, data=message.data)
+        elif isinstance(message, raw_message.Plain):
             return cq_message.MessageSegment.text(message.text)
         elif isinstance(message, raw_message.At):
             return cq_message.MessageSegment.at(message.target)
@@ -366,6 +384,8 @@ class CQSession(BotSession, Api):
             ret = raw_message.App(content=json.loads(aiocqhttp.message.unescape(data['content'])))
         elif type_ == 'reply':
             ret = Quote(id=int(data['id']))
+        elif type_ == 'json':
+            ret = raw_message.App(content=json.loads(data['data']))
         else:
             logger.debug(f'Unknown message {message} of type {type_}')
             ret = raw_message.Unknown()
@@ -467,7 +487,7 @@ class CQSession(BotSession, Api):
                 return event
         elif cq_event.type == 'request':
             if cq_event.detail_type == 'friend':
-                event = NewFriendRequestEvent(
+                event = FriendAddRequestEvent(
                     qq=cq_event.user_id,
                     comment=cq_event.comment,
                     flag=cq_event.flag,

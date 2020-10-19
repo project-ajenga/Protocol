@@ -14,6 +14,7 @@ import aiohttp
 import quart
 from quart import Quart
 
+import ajenga.event as raw_event
 import ajenga.message as raw_message
 from ajenga.event import FriendMessageEvent
 from ajenga.event import GroupMessageEvent
@@ -41,6 +42,7 @@ from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
 from ajenga_app import BotSession
 from ajenga_app import app
+from ajenga_app import this
 from .api import ApiError
 
 logger = logger.getChild('mirai-protocol')
@@ -174,6 +176,82 @@ def _catch(func):
     return wrapper
 
 
+@dataclass
+class FriendAddRequestEvent(raw_event.FriendAddRequestEvent):
+    event_id: str
+
+    @_catch
+    async def _reply(self, operate: int, message: str = ''):
+        session: MiraiSession = this.bot
+        await session._api.call_action(action='resp/newFriendRequestEvent',
+                                       eventId=self.event_id,
+                                       fromId=self.qq,
+                                       groupId=0,
+                                       message=message,
+                                       operate=operate,
+                                       )
+
+    async def accept(self, **kwargs):
+        return await self._reply(0)
+
+    async def reject(self, **kwargs):
+        return await self._reply(1)
+
+    async def ignore(self):
+        return await self._reply(2)
+
+
+@dataclass
+class GroupJoinRequestEvent(raw_event.GroupJoinRequestEvent):
+    event_id: str
+
+    @_catch
+    async def _reply(self, operate: int, message: str = ''):
+        session: MiraiSession = this.bot
+        await session._api.call_action(action='resp/memberJoinRequestEvent',
+                                       eventId=self.event_id,
+                                       fromId=self.qq,
+                                       groupId=self.group,
+                                       message=message,
+                                       operate=operate,
+                                       )
+
+    async def accept(self, **kwargs):
+        return await self._reply(0)
+
+    async def reject(self, **kwargs):
+        return await self._reply(1)
+
+    async def ignore(self):
+        return await self._reply(2)
+
+
+@dataclass
+class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
+    event_id: str
+
+    @_catch
+    async def _reply(self, operate: int, message: str = ''):
+        session: MiraiSession = this.bot
+        await session._api.call_action(action='resp/botInvitedJoinGroupRequestEvent',
+                                       eventId=self.event_id,
+                                       fromId=self.operator,
+                                       groupId=self.group,
+                                       groupName="",
+                                       message=message,
+                                       operate=operate,
+                                       )
+
+    async def accept(self, **kwargs):
+        return await self._reply(0)
+
+    async def reject(self, **kwargs):
+        return await self._reply(1)
+
+    async def ignore(self):
+        pass
+
+
 class MiraiSession(BotSession, Api):
 
     def __init__(self, api_root, auth_key, session_key, qq):
@@ -297,8 +375,8 @@ class MiraiSession(BotSession, Api):
                                     ) -> ApiResult[GroupMember]:
         res = await self._api.memberInfo(target=group, memberId=qq, request_method='get')
         return ApiResult(Code.Success, GroupMember(
-            id=res.get('id'),
-            name=res.get('memberName'),
+            id=qq,
+            name=res.get('name'),
             permission=self._role_to_permission[res.get('permission')],
         ))
 
@@ -446,6 +524,7 @@ class MiraiSession(BotSession, Api):
         'OWNER': GroupPermission.OWNER,
         'ADMINISTRATOR': GroupPermission.ADMIN,
         'MEMBER': GroupPermission.MEMBER,
+        None: GroupPermission.MEMBER,
     }
 
     def as_event(self, mi_event):
@@ -534,6 +613,29 @@ class MiraiSession(BotSession, Api):
                 qq=mi_event['member']['id'],
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
                 group=mi_event['group']['id'],
+            )
+            return event
+        elif type_ == 'NewFriendRequestEvent':
+            event = FriendAddRequestEvent(
+                qq=mi_event['fromId'],
+                comment=mi_event['message'],
+                event_id=mi_event['eventId'],
+            )
+            return event
+        elif type_ == 'MemberJoinRequestEvent':
+            event = GroupJoinRequestEvent(
+                qq=mi_event['fromId'],
+                group=mi_event['groupId'],
+                comment=mi_event['message'],
+                event_id=mi_event['eventId'],
+            )
+            return event
+        elif type_ == 'BotInvitedJoinGroupRequestEvent':
+            event = GroupInvitedRequestEvent(
+                operator=mi_event['fromId'],
+                group=mi_event['groupId'],
+                comment=mi_event['message'],
+                event_id=mi_event['eventId'],
             )
             return event
         return None
