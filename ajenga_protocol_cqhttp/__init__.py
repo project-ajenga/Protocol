@@ -67,7 +67,7 @@ class Image(raw_message.Image):
         return 'base64://' + base64_str
 
     def raw(self) -> Optional[MessageElement]:
-        return raw_message.Image(url=self.url, content=self.content)
+        return raw_message.Image(url=self.url, hash=self.hash, content=self.content)
 
     def __eq__(self, other):
         return (isinstance(other, Image) and self.file == other.file) or super(Image, self).__eq__(other)
