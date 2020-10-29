@@ -356,6 +356,12 @@ class CQSession(BotSession, Api):
             return cq_message.MessageSegment.record(message.file)
         elif isinstance(message, raw_message.Voice):
             return cq_message.MessageSegment.record(message.url)
+        elif isinstance(message, raw_message.App):
+            return cq_message.MessageSegment(type_='json',
+                                             data={'data': cq_message.escape((json.dumps(message.content)))})
+        elif isinstance(message, raw_message.Xml):
+            return cq_message.MessageSegment(type_='xml',
+                                             data={'data': cq_message.escape(message.content)})
         else:
             logger.debug(f'Unknown message {message} of type {type(message)}')
             return cq_message.MessageSegment.text('')
@@ -381,11 +387,13 @@ class CQSession(BotSession, Api):
         elif type_ == 'record':
             ret = Voice(file=data['file'])
         elif type_ == 'rich':
-            ret = raw_message.App(content=json.loads(aiocqhttp.message.unescape(data['content'])))
+            ret = raw_message.App(content=json.loads(cq_message.unescape(data['content'])))
         elif type_ == 'reply':
             ret = Quote(id=int(data['id']))
         elif type_ == 'json':
-            ret = raw_message.App(content=json.loads(data['data']))
+            ret = raw_message.App(content=json.loads(cq_message.unescape(data['data'])))
+        elif type_ == 'xml':
+            ret = raw_message.Xml(content=data['data'])
         else:
             logger.debug(f'Unknown message {message} of type {type_}')
             ret = raw_message.Unknown()
