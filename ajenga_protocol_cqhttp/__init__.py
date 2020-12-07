@@ -66,7 +66,7 @@ class Image(raw_message.Image):
         base64_str = base64.b64encode(self.content).decode()
         return 'base64://' + base64_str
 
-    def raw(self) -> Optional[MessageElement]:
+    async def raw(self) -> Optional[MessageElement]:
         return raw_message.Image(url=self.url, hash=self.hash, content=self.content)
 
     def __eq__(self, other):
@@ -77,13 +77,13 @@ class Image(raw_message.Image):
 class Voice(raw_message.Voice):
     file: str = None
 
-    def raw(self) -> "MessageElement":
+    async def raw(self) -> "MessageElement":
         return raw_message.Voice(url=self.url, content=self.content)
 
 
 @dataclass
 class Quote(raw_message.Quote):
-    def raw(self) -> Optional[MessageElement]:
+    async def raw(self) -> Optional[MessageElement]:
         return raw_message.Quote(id=self.id)
 
 
@@ -186,16 +186,16 @@ class CQSession(BotSession, Api):
     def api(self) -> Api:
         return self
 
-    def wrap_message(self, message: MessageElement) -> MessageElement:
+    async def wrap_message(self, message: MessageElement, **kwargs) -> MessageElement:
         if message.referer == self.qq:
             return message
         elif isinstance(message, raw_message.Image):
-            message = message.raw()
+            message = await message.raw()
             message = Image(url=message.url, content=message.content)
             message.referer = self.qq
             return message
         else:
-            message = message.raw()
+            message = await message.raw()
             message.referer = self.qq
             return message
 
@@ -335,7 +335,7 @@ class CQSession(BotSession, Api):
     #
 
     async def prepare_message(self, message: Message_T) -> MessageChain:
-        return MessageChain(message).to(self)
+        return await MessageChain(message).to(self)
 
     def as_cq_el(self, message: MessageElement) -> cq_message.MessageSegment:
         if isinstance(message, Raw):
@@ -393,7 +393,7 @@ class CQSession(BotSession, Api):
         elif type_ == 'json':
             ret = raw_message.App(content=json.loads(cq_message.unescape(data['data'])))
         elif type_ == 'xml':
-            ret = raw_message.Xml(content=data['data'])
+            ret = raw_message.Xml(content=cq_message.unescape(data['data']))
         else:
             logger.debug(f'Unknown message {message} of type {type_}')
             ret = raw_message.Unknown()

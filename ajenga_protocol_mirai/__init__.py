@@ -16,6 +16,7 @@ from quart import Quart
 
 import ajenga.event as raw_event
 import ajenga.message as raw_message
+from ajenga.event import Event
 from ajenga.event import FriendMessageEvent
 from ajenga.event import GroupMessageEvent
 from ajenga.event import GroupMuteEvent
@@ -59,7 +60,7 @@ METHOD_TEMP = 'temp'
 class Source(raw_message.Meta):
     id: MessageIdType
 
-    def raw(self) -> Optional[MessageElement]:
+    async def raw(self) -> Optional[MessageElement]:
         return None
 
 
@@ -110,7 +111,7 @@ class Image(raw_message.Image):
         else:
             raise ValueError("No upload method specified for Image!")
 
-    def raw(self) -> Optional[MessageElement]:
+    async def raw(self) -> Optional[MessageElement]:
         return raw_message.Image(url=self.url, content=self.content, hash=self.hash)
 
     def __eq__(self, other):
@@ -145,7 +146,7 @@ class Voice(raw_message.Voice):
 
 @dataclass
 class Quote(raw_message.Quote):
-    def raw(self) -> Optional[MessageElement]:
+    async def raw(self) -> Optional[MessageElement]:
         return raw_message.Quote(id=self.id)
 
 
@@ -272,10 +273,10 @@ class MiraiSession(BotSession, Api):
     def api(self) -> Api:
         return self
 
-    def wrap_message(self, message: MessageElement, method=None) -> MessageElement:
+    async def wrap_message(self, message: MessageElement, method=None) -> MessageElement:
         if message.referer == self.qq:
             return message
-        message = message.raw()
+        message = await message.raw()
         if isinstance(message, raw_message.Image):
             message2 = Image(url=message.url, content=message.content, method=method)
             message2.referer = self.qq
@@ -416,6 +417,17 @@ class MiraiSession(BotSession, Api):
                 remark=friend.get('remark'),
             ))
         return ApiResult(Code.Success, friends)
+
+    @_catch
+    async def _fetch_message(self, count=100) -> ApiResult[List[Event]]:
+        res = await self._api.fetchMessage(count=count, request_method='get')
+        events = []
+        if res.get('code') == 0:
+            for ev in res.get('data', []):
+                if event := self.as_event(ev):
+                    events.append(event)
+            return ApiResult(Code.Success, events)
+        return ApiResult(res.get('code'))
 
     # Message Utils
 
@@ -589,7 +601,7 @@ class MiraiSession(BotSession, Api):
             event = GroupMuteEvent(
                 qq=self.qq,
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
-                group=mi_event['group']['id'],
+                group=mi_event['member']['group']['id'],
                 duration=mi_event['durationSeconds'],
             )
             return event
@@ -597,7 +609,7 @@ class MiraiSession(BotSession, Api):
             event = GroupMuteEvent(
                 qq=mi_event['member']['id'],
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
-                group=mi_event['group']['id'],
+                group=mi_event['member']['group']['id'],
                 duration=mi_event['durationSeconds'],
             )
             return event
@@ -605,14 +617,14 @@ class MiraiSession(BotSession, Api):
             event = GroupUnmuteEvent(
                 qq=self.qq,
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
-                group=mi_event['group']['id'],
+                group=mi_event['member']['group']['id'],
             )
             return event
         elif type_ == 'MemberUnmuteEvent':
             event = GroupUnmuteEvent(
                 qq=mi_event['member']['id'],
                 operator=mi_event['operator']['id'] if mi_event['operator'] else self.qq,
-                group=mi_event['group']['id'],
+                group=mi_event['member']['group']['id'],
             )
             return event
         elif type_ == 'NewFriendRequestEvent':
@@ -643,9 +655,9 @@ class MiraiSession(BotSession, Api):
     async def prepare_message(self, message: Message_T) -> MessageChain:
         # print('send: ', raw_message)
         if isinstance(message, MessageChain):
-            message = message.to(self, method=upload_method.get())
+            message = await message.to(self, method=upload_method.get())
         else:
-            message = MessageChain(message).to(self, method=upload_method.get())
+            message = await MessageChain(message).to(self, method=upload_method.get())
         # print('send now: ', raw_message)
         for msg in message:
             if isinstance(msg, Image):
@@ -681,9 +693,12 @@ class MiraiSession(BotSession, Api):
         async def _on_report():
             event = await quart.request.get_json()
             logger.debug(event)
-
-            if event := self.as_event(event):
-                self.handle_event_nowait(event)
+            try:
+                if event := self.as_event(event):
+                    self.handle_event_nowait(event)
+            except Exception as e:
+                logger.critical(e)
+                return {'code': -1}
 
             return {'code': 0}
 
@@ -705,9 +720,13 @@ class MiraiSession(BotSession, Api):
                             continue
                         if not event:
                             continue
+
                         logger.debug(event)
-                        if event := self.as_event(event):
-                            self.handle_event_nowait(event)
+                        try:
+                            if event := self.as_event(event):
+                                self.handle_event_nowait(event)
+                        except Exception as e:
+                            logger.critical(e)
 
         if not on:
             return
@@ -715,23 +734,50 @@ class MiraiSession(BotSession, Api):
         self._ws_on = True
         return _ws()
 
+    def set_poll(self, interval=0.5):
+        async def _poll():
+            while True:
+                try:
+                    res = await self._fetch_message()
+                    if res.ok:
+                        for event in res.data:
+                            self.handle_event_nowait(event)
+                except Exception as e:
+                    logger.error(e)
+                finally:
+                    await asyncio.sleep(interval)
+
+        return _poll()
+
 
 async def auth(api_root, auth_key):
-    async with aiohttp.request("POST", api_root + 'auth', json={'authKey': auth_key}) as resp:
-        if 200 <= resp.status < 300:
-            result = json.loads(await resp.text())
-            logger.info(f'Login Mirai: {result}')
-            if result.get('code') == 0:
-                return result['session']
+    try:
+        async with aiohttp.request("POST", api_root + 'auth', json={'authKey': auth_key}) as resp:
+            if 200 <= resp.status < 300:
+                result = json.loads(await resp.text())
+                logger.info(f'Login Mirai: {result}')
+                if result.get('code') == 0:
+                    return result['session']
+    except Exception as e:
+        logger.error(e)
+        return
 
 
-async def connect(host, port, auth_key, qq) -> Optional[MiraiSession]:
+async def connect(host, port, auth_key, qq, max_retries=1) -> Optional[MiraiSession]:
     api_root = f'http://{host}:{port}/'
 
+    retries = 0
     session_key = await auth(api_root=api_root,
                              auth_key=auth_key)
+    while not session_key and (retries < max_retries or max_retries < 0):
+        retries += 1
+        logger.info(f"Connection failed. Retrying {retries} times in 5s ...")
+        await asyncio.sleep(5)
+        session_key = await auth(api_root=api_root,
+                                 auth_key=auth_key)
 
     if not session_key:
+        logger.critical(f"Connection failed. Exiting ...")
         return
 
     session = MiraiSession(api_root=api_root,
