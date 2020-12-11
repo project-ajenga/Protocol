@@ -165,7 +165,6 @@ class CQSession(BotSession, Api):
         self._cqhttp = CQHttp(message_class=aiocqhttp.Message, **kwargs)
         self._api = self._cqhttp.api
         self._queue = asyncio.Queue()
-        self._open = True
 
         @self._cqhttp.on_message()
         @self._cqhttp.on_request()
@@ -181,6 +180,14 @@ class CQSession(BotSession, Api):
     @property
     def qq(self) -> int:
         return self._qq
+
+    @property
+    def ok(self) -> bool:
+        return True
+
+    @property
+    def asgi(self):
+        return self._cqhttp.asgi
 
     @property
     def api(self) -> Api:
@@ -518,9 +525,3 @@ class CQSession(BotSession, Api):
                 )
                 return event
         return None
-
-
-def connect(qq, **kwargs):
-    session = CQSession(qq=qq)
-    asyncio.create_task(session.run_task(**kwargs))
-    return session

@@ -255,19 +255,77 @@ class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
 
 class MiraiSession(BotSession, Api):
 
-    def __init__(self, api_root, auth_key, session_key, qq):
+    def __init__(self, host, port, *, auth_key='', qq, enable_ws=False, enable_poll=False, report_path=None, max_retries=0, retry_interval=30):
         self._qq = qq
-        self._api_root = api_root
+        self._host = host
+        self._port = port
+        self._api_root = f'http://{self._host}:{self._port}/'
         self._auth_key = auth_key
-        self._ws_on = False
+        self._max_retries = max_retries
+        self._retry_interval = retry_interval
+        self._enable_ws = enable_ws
+        self._enable_poll = enable_poll
+        self._report_path = report_path
+        self._session_key = None
+        self._api = None
+        self._app = Quart('')
+        self._app.before_serving(self.connect)
+        if self._report_path:
+            self.set_report(self._report_path)
+
+        self._ok = False
+
+    async def connect(self):
+        retries = 0
+        session_key = await self._auth()
+        while not session_key and (retries < self._max_retries or self._max_retries < 0):
+            retries += 1
+            logger.info(f"Connection failed. Retrying {retries}th time in {self._retry_interval}s ...")
+            await asyncio.sleep(self._retry_interval)
+            session_key = await self._auth()
+
+        if not session_key:
+            logger.critical(f"Connection failed. Exiting ...")
+            return
+
         self._session_key = session_key
-        self._api = api.HttpApi(api_root, session_key, 30)
+        self._api = api.HttpApi(self._api_root, session_key, 30)
+
+        if not await self._api.verify(qq=self._qq):
+            raise api.ApiError(api.Code.Unavailable, "Verify Failed")
+
+        self._ok = True
+
+        if self._enable_ws:
+            asyncio.create_task(self.set_report_ws())
+        if self._enable_poll:
+            asyncio.create_task(self.set_poll())
+
+    async def _auth(self):
+        try:
+            async with aiohttp.request("POST", self._api_root + 'auth', json={'authKey': self._auth_key}) as resp:
+                if 200 <= resp.status < 300:
+                    result = json.loads(await resp.text())
+                    logger.info(f'Login Mirai: {result}')
+                    if result.get('code') == 0:
+                        return result['session']
+        except Exception as e:
+            logger.error(e)
+            return
 
     @property
     def qq(self) -> int:
         return self._qq
 
     # Implement abstract function for BotSession
+
+    @property
+    def ok(self) -> bool:
+        return True
+
+    @property
+    def asgi(self):
+        return self._app.asgi_app
 
     @property
     def api(self) -> Api:
@@ -665,31 +723,32 @@ class MiraiSession(BotSession, Api):
         # logger.debug(f'send now:  {raw_message}')
         return message
 
-    async def relogin(self, sleep=3, retries=None):
+    async def relogin(self, sleep=5, retries=None):
+        self._ok = False
         _retries = 0
         while not retries or _retries < retries:
             _retries += 1
             try:
-                new_session_key = await auth(api_root=self._api_root,
-                                             auth_key=self._auth_key)
+                new_session_key = await self._auth()
                 if not new_session_key:
-                    return False
+                    raise ApiError(Code.Unavailable)
 
                 self._session_key = new_session_key
                 self._api.update_session(new_session_key)
 
                 if await self._api.verify(qq=self.qq):
-                    asyncio.create_task(self.set_report_ws(self._ws_on))
+                    if self._enable_ws:
+                        asyncio.create_task(self.set_report_ws())
                     return True
-                return False
-            except Exception as e:
-                logger.exception(e)
+                else:
+                    raise ApiError(Code.Unavailable, "Verify failed")
+            except ApiError as e:
+                logger.info(f'Failed to login by {e}, retry in {sleep}s or exit ...')
                 await asyncio.sleep(sleep)
 
     def set_report(self, report_path: str, **kwargs):
-        self._server_app = Quart('')
 
-        @self._server_app.route(report_path, methods=['POST'])
+        @self._app.route(report_path, methods=['POST'])
         async def _on_report():
             event = await quart.request.get_json()
             logger.debug(event)
@@ -702,9 +761,7 @@ class MiraiSession(BotSession, Api):
 
             return {'code': 0}
 
-        return self._server_app.run_task(use_reloader=False, **kwargs)
-
-    def set_report_ws(self, on: bool, **kwargs):
+    def set_report_ws(self, **kwargs):
         async def _ws():
             async with aiohttp.ClientSession() as client:
                 async with client.ws_connect(f"{self._api_root}all/?sessionKey={self._session_key}", **kwargs) as ws:
@@ -713,7 +770,7 @@ class MiraiSession(BotSession, Api):
                             event = await ws.receive_json()
                         except TypeError:
                             if ws.closed:
-                                logger.error('Websocket closed, try relogin')
+                                logger.warning('Websocket closed, try relogin')
                                 await self.relogin()
                                 return
                             logger.error(f"TypeError in parsing ws event")
@@ -728,10 +785,6 @@ class MiraiSession(BotSession, Api):
                         except Exception as e:
                             logger.critical(e)
 
-        if not on:
-            return
-
-        self._ws_on = True
         return _ws()
 
     def set_poll(self, interval=0.5):
@@ -748,41 +801,3 @@ class MiraiSession(BotSession, Api):
                     await asyncio.sleep(interval)
 
         return _poll()
-
-
-async def auth(api_root, auth_key):
-    try:
-        async with aiohttp.request("POST", api_root + 'auth', json={'authKey': auth_key}) as resp:
-            if 200 <= resp.status < 300:
-                result = json.loads(await resp.text())
-                logger.info(f'Login Mirai: {result}')
-                if result.get('code') == 0:
-                    return result['session']
-    except Exception as e:
-        logger.error(e)
-        return
-
-
-async def connect(host, port, auth_key, qq, max_retries=1) -> Optional[MiraiSession]:
-    api_root = f'http://{host}:{port}/'
-
-    retries = 0
-    session_key = await auth(api_root=api_root,
-                             auth_key=auth_key)
-    while not session_key and (retries < max_retries or max_retries < 0):
-        retries += 1
-        logger.info(f"Connection failed. Retrying {retries} times in 5s ...")
-        await asyncio.sleep(5)
-        session_key = await auth(api_root=api_root,
-                                 auth_key=auth_key)
-
-    if not session_key:
-        logger.critical(f"Connection failed. Exiting ...")
-        return
-
-    session = MiraiSession(api_root=api_root,
-                           auth_key=auth_key,
-                           session_key=session_key,
-                           qq=qq)
-    if await session._api.verify(qq=qq):
-        return session
