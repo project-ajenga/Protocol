@@ -41,9 +41,9 @@ from ajenga.protocol import Api
 from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
-from ajenga_app import BotSession
-from ajenga_app import app
-from ajenga_app import this
+from ajenga.app import BotSession
+from ajenga import app
+from ajenga.ctx import this
 from .api import ApiError
 
 logger = logger.getChild('mirai-protocol')

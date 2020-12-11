@@ -39,8 +39,8 @@ from ajenga.protocol import Api
 from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
-from ajenga_app import BotSession
-from ajenga_app import this
+from ajenga.app import BotSession
+from ajenga.ctx import this
 
 
 logger = logger.getChild('cqhttp-protocol')
