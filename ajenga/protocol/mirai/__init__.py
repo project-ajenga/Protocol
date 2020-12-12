@@ -352,7 +352,8 @@ class MiraiSession(BotSession, Api):
                                  ) -> ApiResult[MessageSendResult]:
         token = upload_method.set(METHOD_GROUP)
         msg = await self.prepare_message(message)
-        if quote := msg.get_first(Quote):
+        quote = msg.get_first(Quote)
+        if quote:
             msg.remove(quote)
             res: dict = await self._api.sendGroupMessage(group=group, messageChain=self.as_mirai_chain(msg),
                                                          quote=quote.id)
@@ -482,7 +483,8 @@ class MiraiSession(BotSession, Api):
         events = []
         if res.get('code') == 0:
             for ev in res.get('data', []):
-                if event := self.as_event(ev):
+                event = self.as_event(ev)
+                if event:
                     events.append(event)
             return ApiResult(Code.Success, events)
         return ApiResult(res.get('code'))
@@ -753,7 +755,8 @@ class MiraiSession(BotSession, Api):
             event = await quart.request.get_json()
             logger.debug(event)
             try:
-                if event := self.as_event(event):
+                event = self.as_event(event)
+                if event:
                     self.handle_event_nowait(event)
             except Exception as e:
                 logger.critical(e)
@@ -780,7 +783,8 @@ class MiraiSession(BotSession, Api):
 
                         logger.debug(event)
                         try:
-                            if event := self.as_event(event):
+                            event = self.as_event(event)
+                            if event:
                                 self.handle_event_nowait(event)
                         except Exception as e:
                             logger.critical(e)

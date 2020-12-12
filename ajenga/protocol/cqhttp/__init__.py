@@ -171,7 +171,8 @@ class CQSession(BotSession, Api):
         @self._cqhttp.on_notice()
         async def _on_event(event: aiocqhttp.Event):
             logger.debug(event)
-            if event := self.as_event(event):
+            event = self.as_event(event)
+            if event:
                 self.handle_event_nowait(event)
 
     def run_task(self, **kwargs):
