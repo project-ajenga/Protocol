@@ -39,7 +39,7 @@ from ajenga.protocol import Api
 from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
-from ajenga.app import BotSession
+from ajenga.app import BotSession, get_session, register_session
 from ajenga.ctx import this
 
 
@@ -156,27 +156,38 @@ class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
         pass
 
 
-class CQSession(BotSession, Api):
-
+class CQProtocol:
     _cqhttp: CQHttp
 
-    def __init__(self, qq, **kwargs):
-        self._qq = qq
+    def __init__(self, **kwargs):
         self._cqhttp = CQHttp(message_class=aiocqhttp.Message, **kwargs)
         self._api = self._cqhttp.api
-        self._queue = asyncio.Queue()
 
         @self._cqhttp.on_message()
         @self._cqhttp.on_request()
         @self._cqhttp.on_notice()
         async def _on_event(event: aiocqhttp.Event):
+            session = get_session(event.self_id)
+            if not session:
+                return
             logger.debug(event)
-            event = self.as_event(event)
+            event = session.as_event(event)
             if event:
-                self.handle_event_nowait(event)
+                session.handle_event_nowait(event)
+
+        @self._cqhttp.on_meta_event("lifecycle.connect")
+        async def _on_meta_event(event: aiocqhttp.Event):
+            session = CQSession(qq=event.self_id, cq=self._cqhttp)
+            register_session(session, event.self_id)
 
     def run_task(self, **kwargs):
         return self._cqhttp.run_task(use_reloader=False, **kwargs)
+
+class CQSession(BotSession, Api):
+
+    def __init__(self, qq: ContactIdType, cq: CQHttp):
+        self._qq = qq
+        self._api = cq.api
 
     @property
     def qq(self) -> int:
@@ -187,27 +198,50 @@ class CQSession(BotSession, Api):
         return True
 
     @property
-    def asgi(self):
-        return self._cqhttp.asgi
-
-    @property
     def api(self) -> Api:
         return self
 
     async def wrap_message(self, message: MessageElement, **kwargs) -> MessageElement:
         if message.referer == self.qq:
             return message
+        message = await message.raw()
+        if message is None:
+            return None
         elif isinstance(message, raw_message.Image):
-            message = await message.raw()
             message = Image(url=message.url, content=message.content)
             message.referer = self.qq
             return message
         else:
-            message = await message.raw()
             message.referer = self.qq
             return message
 
     #
+
+    def _as_cq_forward_nodes(self, message: raw_message.Forward) -> List:
+        """
+        Go-CQHTTP Forward Message Support
+        Experimental
+        """
+        ret = []
+        for node in message.content:
+            if node.id:
+                ret.append({
+                    'type': 'node',
+                    'data': {
+                        'id': node.id,
+                    },
+                })
+            elif node.qq:
+                ret.append({
+                    'type': 'node',
+                    'data': {
+                        'name': node.name,
+                        'uin': node.qq,
+                        'content': self.as_cq_chain(node.content),
+                    },
+                })
+        logger.debug(repr(ret))
+        return ret
 
     @_catch
     async def send_group_message(self,
@@ -215,7 +249,11 @@ class CQSession(BotSession, Api):
                                  message: Message_T,
                                  ) -> ApiResult[MessageSendResult]:
         message = await self.prepare_message(message)
-        res: dict = await self._api.send_group_msg(group_id=group, message=self.as_cq_chain(message))
+        # Go-CQHTTP Forward Message
+        if message.get_first(raw_message.Forward):
+            res: dict = await self._api.send_group_forward_msg(group_id=group, messages=self._as_cq_forward_nodes(message.get_first(raw_message.Forward)))
+        else:
+            res: dict = await self._api.send_group_msg(group_id=group, message=self.as_cq_chain(message))
         return ApiResult(Code.Success, MessageSendResult(res['message_id']))
 
     @_catch
@@ -374,9 +412,12 @@ class CQSession(BotSession, Api):
             logger.debug(f'Unknown message {message} of type {type(message)}')
             return cq_message.MessageSegment.text('')
 
-    def as_cq_chain(self, message: Message_T) -> str:
+    def as_cq_chain(self, message: Message_T) -> List:
+        ret = list((self.as_cq_el(x)) for x in MessageChain(message))
+        return ret
+
+    def as_cq_chain_string(self, message: Message_T) -> str:
         ret = ''.join(str(self.as_cq_el(x)) for x in MessageChain(message))
-        logger.debug(f'sending : {repr(ret)}')
         return ret
 
     def as_message_el(self, message: aiocqhttp.MessageSegment) -> MessageElement:

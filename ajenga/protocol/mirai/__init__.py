@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from dataclasses import field
 from functools import wraps
+import re
 from typing import List
 from typing import Optional
 from urllib.parse import urlparse
@@ -41,7 +42,7 @@ from ajenga.protocol import Api
 from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
-from ajenga.app import BotSession
+from ajenga.app import BotSession, register_session
 from ajenga import app
 from ajenga.ctx import this
 from .api import ApiError
@@ -268,10 +269,10 @@ class MiraiSession(BotSession, Api):
         self._report_path = report_path
         self._session_key = None
         self._api = None
-        self._app = Quart('')
-        self._app.before_serving(self.connect)
-        if self._report_path:
-            self.set_report(self._report_path)
+        # self._app = Quart('')
+        # self._app.before_serving(self.connect)
+        # if self._report_path:
+            # self.set_report(self._report_path)
 
         self._ok = False
 
@@ -295,6 +296,7 @@ class MiraiSession(BotSession, Api):
             raise api.ApiError(api.Code.Unavailable, "Verify Failed")
 
         self._ok = True
+        register_session(self, self.qq)
 
         if self._enable_ws:
             asyncio.create_task(self.set_report_ws())
@@ -324,10 +326,6 @@ class MiraiSession(BotSession, Api):
         return True
 
     @property
-    def asgi(self):
-        return self._app.asgi_app
-
-    @property
     def api(self) -> Api:
         return self
 
@@ -335,7 +333,9 @@ class MiraiSession(BotSession, Api):
         if message.referer == self.qq:
             return message
         message = await message.raw()
-        if isinstance(message, raw_message.Image):
+        if message is None:
+            return None
+        elif isinstance(message, raw_message.Image):
             message2 = Image(url=message.url, content=message.content, method=method)
             message2.referer = self.qq
             return message2
@@ -748,21 +748,21 @@ class MiraiSession(BotSession, Api):
                 logger.info(f'Failed to login by {e}, retry in {sleep}s or exit ...')
                 await asyncio.sleep(sleep)
 
-    def set_report(self, report_path: str, **kwargs):
+    # def set_report(self, report_path: str, **kwargs):
 
-        @self._app.route(report_path, methods=['POST'])
-        async def _on_report():
-            event = await quart.request.get_json()
-            logger.debug(event)
-            try:
-                event = self.as_event(event)
-                if event:
-                    self.handle_event_nowait(event)
-            except Exception as e:
-                logger.critical(e)
-                return {'code': -1}
+    #     @self._app.route(report_path, methods=['POST'])
+    #     async def _on_report():
+    #         event = await quart.request.get_json()
+    #         logger.debug(event)
+    #         try:
+    #             event = self.as_event(event)
+    #             if event:
+    #                 self.handle_event_nowait(event)
+    #         except Exception as e:
+    #             logger.critical(e)
+    #             return {'code': -1}
 
-            return {'code': 0}
+    #         return {'code': 0}
 
     def set_report_ws(self, **kwargs):
         async def _ws():
