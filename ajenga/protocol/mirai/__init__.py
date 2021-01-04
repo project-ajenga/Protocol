@@ -42,12 +42,12 @@ from ajenga.protocol import Api
 from ajenga.protocol import ApiResult
 from ajenga.protocol import Code
 from ajenga.protocol import MessageSendResult
-from ajenga.app import BotSession, register_session
+from ajenga.app import BotSession, register_session, unregister_session
 from ajenga import app
 from ajenga.ctx import this
 from .api import ApiError
 
-logger = logger.getChild('mirai-protocol')
+logger = logger.getChild('protocol.mirai')
 
 from . import api
 
@@ -292,7 +292,8 @@ class MiraiSession(BotSession, Api):
         self._session_key = session_key
         self._api = api.HttpApi(self._api_root, session_key, 30)
 
-        if not await self._api.verify(qq=self._qq):
+        res = await self._api.verify(qq=self._qq)
+        if not res or res.get('code') != 0:
             raise api.ApiError(api.Code.Unavailable, "Verify Failed")
 
         self._ok = True
@@ -727,6 +728,7 @@ class MiraiSession(BotSession, Api):
 
     async def relogin(self, sleep=5, retries=None):
         self._ok = False
+        unregister_session(self, self.qq)
         _retries = 0
         while not retries or _retries < retries:
             _retries += 1
@@ -738,12 +740,14 @@ class MiraiSession(BotSession, Api):
                 self._session_key = new_session_key
                 self._api.update_session(new_session_key)
 
-                if await self._api.verify(qq=self.qq):
-                    if self._enable_ws:
-                        asyncio.create_task(self.set_report_ws())
-                    return True
-                else:
+                res = await self._api.verify(qq=self._qq)
+                if not res or res.get('code') != 0:
                     raise ApiError(Code.Unavailable, "Verify failed")
+
+                if self._enable_ws:
+                    asyncio.create_task(self.set_report_ws())
+                return True
+
             except ApiError as e:
                 logger.info(f'Failed to login by {e}, retry in {sleep}s or exit ...')
                 await asyncio.sleep(sleep)
@@ -773,7 +777,8 @@ class MiraiSession(BotSession, Api):
                             event = await ws.receive_json()
                         except TypeError:
                             if ws.closed:
-                                logger.warning('Websocket closed, try relogin')
+                                logger.warning('Websocket closed, try relogin in 10s')
+                                await asyncio.sleep(10)
                                 await self.relogin()
                                 return
                             logger.error(f"TypeError in parsing ws event")
@@ -788,6 +793,7 @@ class MiraiSession(BotSession, Api):
                                 self.handle_event_nowait(event)
                         except Exception as e:
                             logger.critical(e)
+                            return
 
         return _ws()
 

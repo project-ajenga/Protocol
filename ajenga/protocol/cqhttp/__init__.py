@@ -43,7 +43,7 @@ from ajenga.app import BotSession, get_session, register_session
 from ajenga.ctx import this
 
 
-logger = logger.getChild('cqhttp-protocol')
+logger = logger.getChild('protocol.cqhttp')
 
 
 @dataclass
@@ -167,8 +167,8 @@ class CQProtocol:
         @self._cqhttp.on_request()
         @self._cqhttp.on_notice()
         async def _on_event(event: aiocqhttp.Event):
-            session = get_session(event.self_id)
-            if not session:
+            session: CQSession = get_session(event.self_id)
+            if not session or not isinstance(session, CQSession):
                 return
             logger.debug(event)
             event = session.as_event(event)
