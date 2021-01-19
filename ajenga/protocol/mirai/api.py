@@ -78,7 +78,7 @@ class HttpApi(AsyncApi):
         headers = {}
 
         params['sessionKey'] = self._session_key
-        logger.debug(f'call {action} {request_method} {self._api_root + action} {params}')
+        logger.debug(f'[{request_method}] {self._api_root + action} {params}')
 
         try:
 
@@ -94,7 +94,7 @@ class HttpApi(AsyncApi):
             async with req_cm as resp:
                 if 200 <= resp.status < 300:
                     result = await resp.json()
-                    logger.debug(f'recv resp: {result}')
+                    logger.debug(f'[resp] {result}')
                     return _handle_api_result(result)
                 else:
                     raise ApiError(code=ApiError.CODE_NETWORK_ERROR,
@@ -115,7 +115,7 @@ class HttpApi(AsyncApi):
                 async with session.post(self._api_root + "uploadImage", data=upload_data) as resp:
                     if 200 <= resp.status < 300:
                         result = await resp.json()
-                        logger.debug(f'recv resp: {result}')
+                        logger.debug(f'[resp] {result}')
                         return _handle_api_result(result)
                     else:
                         raise ApiError(code=ApiError.CODE_NETWORK_ERROR,
@@ -137,7 +137,7 @@ class HttpApi(AsyncApi):
                 async with session.post(self._api_root + "uploadVoice", data=upload_data) as resp:
                     if 200 <= resp.status < 300:
                         result = await resp.json()
-                        logger.debug(f'recv resp: {result}')
+                        logger.debug(f'[resp] {result}')
                         return _handle_api_result(result)
                     else:
                         raise ApiError(code=ApiError.CODE_NETWORK_ERROR,

@@ -67,6 +67,9 @@ class Source(raw_message.Meta):
 
 @dataclass
 class Image(raw_message.Image):
+    __struct_type__ = "mirai:image"
+    __struct_fields__ = ("url", "hash", "id")
+
     id: ImageIdType = None
     method: str = field(default_factory=upload_method.get)
 
@@ -96,7 +99,6 @@ class Image(raw_message.Image):
                     self.set_content(await resp.content.read())
         bot: Optional[MiraiSession] = app.get_session(self.referer)
         img = await bot._upload_image(self.method, self.content, f'{self.hash}.png')
-        logger.debug(f'Got resp !  {img}')
         self.id = img.id
 
     async def prepare(self, method=None):
@@ -121,6 +123,9 @@ class Image(raw_message.Image):
 
 @dataclass
 class Voice(raw_message.Voice):
+    __struct_type__ = "mirai:voice"
+    __struct_fields__ = ("url", "hash", "id")
+
     id: VoiceIdType = None
     # json: str = None
     method: str = field(default_factory=upload_method.get)
@@ -728,7 +733,7 @@ class MiraiSession(BotSession, Api):
 
     async def relogin(self, sleep=5, retries=None):
         self._ok = False
-        unregister_session(self, self.qq)
+        unregister_session(self.qq)
         _retries = 0
         while not retries or _retries < retries:
             _retries += 1
@@ -786,7 +791,7 @@ class MiraiSession(BotSession, Api):
                         if not event:
                             continue
 
-                        logger.debug(event)
+                        logger.debug(f"[event] {event}")
                         try:
                             event = self.as_event(event)
                             if event:

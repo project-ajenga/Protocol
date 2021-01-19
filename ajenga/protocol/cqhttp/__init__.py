@@ -54,6 +54,9 @@ class Raw(raw_message.Meta):
 
 @dataclass
 class Image(raw_message.Image):
+    __struct_type__ = "cq:image"
+    __struct_fields__ = ("url", "hash", "file")
+
     file: str = None
 
     def __post_init__(self):
@@ -170,7 +173,7 @@ class CQProtocol:
             session: CQSession = get_session(event.self_id)
             if not session or not isinstance(session, CQSession):
                 return
-            logger.debug(event)
+            logger.debug(f"[event] {event}")
             event = session.as_event(event)
             if event:
                 session.handle_event_nowait(event)
