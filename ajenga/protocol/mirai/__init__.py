@@ -782,7 +782,7 @@ class MiraiSession(BotSession, Api):
     def set_report_ws(self, **kwargs):
         async def _ws():
             async with aiohttp.ClientSession() as client:
-                async with client.ws_connect(f"{self._api_root}all/?sessionKey={self._session_key}", **kwargs) as ws:
+                async with client.ws_connect(f"{self._api_root}all?sessionKey={self._session_key}", **kwargs) as ws:
                     while True:
                         try:
                             event = await ws.receive_json()
