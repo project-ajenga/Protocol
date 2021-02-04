@@ -314,7 +314,7 @@ class CQSession(BotSession, Api):
         for member in res:
             members.append(GroupMember(
                 id=member.get('user_id'),
-                name=member.get('nickname'),
+                name=member.get('card') or member.get('nickname'),
                 permission=self._role_to_permission[member.get('role')],
             ))
         return ApiResult(Code.Success, members)
