@@ -14,7 +14,7 @@ from aiocqhttp import message as cq_message
 
 import ajenga.event as raw_event
 import ajenga.message as raw_message
-from ajenga.event import FriendMessageEvent
+from ajenga.event import FriendMessageEvent, Event, EventType
 from ajenga.event import FriendRecallEvent
 from ajenga.event import GroupJoinEvent
 from ajenga.event import GroupLeaveEvent
@@ -109,7 +109,7 @@ class FriendAddRequestEvent(raw_event.FriendAddRequestEvent):
     @_catch
     async def _reply(self, approve: bool):
         session: CQSession = this.bot
-        await session._cqhttp.api.set_friend_add_request(flag=self.flag, approve=approve)
+        await session._api.set_friend_add_request(flag=self.flag, approve=approve)
 
     async def accept(self, **kwargs):
         return await self._reply(True)
@@ -128,7 +128,7 @@ class GroupJoinRequestEvent(raw_event.GroupJoinRequestEvent):
     @_catch
     async def _reply(self, approve: bool):
         session: CQSession = this.bot
-        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='add', approve=approve)
+        await session._api.set_group_add_request(flag=self.flag, sub_type='add', approve=approve)
 
     async def accept(self, **kwargs):
         return await self._reply(True)
@@ -147,7 +147,7 @@ class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
     @_catch
     async def _reply(self, approve: bool):
         session: CQSession = this.bot
-        await session._cqhttp.api.set_group_add_request(flag=self.flag, sub_type='invite', approve=approve)
+        await session._api.set_group_add_request(flag=self.flag, sub_type='invite', approve=approve)
 
     async def accept(self, **kwargs):
         return await self._reply(True)
@@ -157,6 +157,13 @@ class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
 
     async def ignore(self):
         pass
+
+
+@dataclass
+class RawCQEvent(Event):
+    type: EventType = field(default=EventType.Protocol, init=False)
+    protocol: str
+    event: dict
 
 
 class CQProtocol:
@@ -174,6 +181,9 @@ class CQProtocol:
             if not session or not isinstance(session, CQSession):
                 return
             logger.debug(f"[event] {event}")
+            # For CQ Compact:
+            session.handle_event_nowait(RawCQEvent(protocol="cqhttp", event=event))
+
             event = session.as_event(event)
             if event:
                 session.handle_event_nowait(event)
