@@ -103,7 +103,7 @@ class Image(raw_message.Image):
             else:
                 async with aiohttp.request("GET", self.url) as resp:
                     self.set_content(await resp.content.read())
-        bot: Optional[MiraiSession] = app.get_session(self.referer)
+        bot: MiraiSession = app.get_session(self.referer)
         img = await bot._upload_image(self.method, self.content, f'{self.hash}.png')
         self.id = img.id
 
@@ -154,6 +154,59 @@ class Voice(raw_message.Voice):
 
         url = ''.join(lurl)
         return url
+
+
+@dataclass
+class File(raw_message.File):
+    __struct_type__ = "mirai:file"
+    __struct_fields__ = ("url", "hash", "name", "id")
+
+    id: str = None
+    path: Optional[str] = None
+    method: str = field(default_factory=upload_method.get)
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.id and self.method == METHOD_GROUP:
+            ind_start = 1
+            self.hash = self.id[ind_start:].replace('-', '').lower()
+        if not self.id and self.method:
+            self.task = asyncio.create_task(self._prepare())
+        else:
+            self.task = None
+
+    async def _prepare(self):
+        if not self.content:
+            logger.debug(f'Fetching file from url = {self.url}')
+            url = urlparse(self.url)
+            if url.scheme == 'file':
+                async with aiofiles.open(url2pathname(url.path), 'rb') as f:
+                    self.set_content(await f.read())
+            else:
+                async with aiohttp.request("GET", self.url) as resp:
+                    self.set_content(await resp.content.read())
+        bot: MiraiSession = app.get_session(self.referer)
+        msg = await bot._upload_file(self.method, self.content, self.name, self.path)
+        self.id = msg.id
+
+    async def prepare(self, method=None):
+        if self.id:
+            return
+        elif method and method != self.method:
+            if self.task:
+                logger.warning(f"Unused file upload cache {self.method} {method}")
+            self.method = method
+            return await self._prepare()
+        elif self.task:
+            await self.task
+        else:
+            raise ValueError("No upload method specified for File!")
+
+    async def raw(self) -> Optional[MessageElement]:
+        return raw_message.File(url=self.url, content=self.content, hash=self.hash, path=self.path)
+
+    def __eq__(self, other):
+        return (isinstance(other, File) and self.id == other.id) or super(File, self).__eq__(other)
 
 
 @dataclass
@@ -506,16 +559,23 @@ class MiraiSession(BotSession, Api):
     async def _upload_image(self, method, img: bytes, name: str):
         # return await self.call_action_(action="uploadImage", type=type_, img=img)
         res = await self._api.upload_image(filedata=img, filename=name, type=method)
-        img_msg = Image(url=res['url'], id=res['imageId'], method=method)
-        img_msg.referer = self.qq
-        return img_msg
+        msg = Image(url=res['url'], id=res['imageId'], method=method)
+        msg.referer = self.qq
+        return msg
 
     async def _upload_voice(self, method, voice: bytes, name: str):
         # return await self.call_action_(action="uploadImage", type=type_, img=img)
         res = await self._api.upload_voice(filedata=voice, filename=name, type=method)
-        voice_msg = Voice(id=res['voiceId'], method=method)
-        voice_msg.referer = self.qq
-        return voice_msg
+        msg = Voice(id=res['voiceId'], method=method)
+        msg.referer = self.qq
+        return msg
+
+    async def _upload_file(self, method, file: bytes, name: str, path: str):
+        # return await self.call_action_(action="uploadImage", type=type_, img=img)
+        res = await self._api.upload_file(filedata=file, filename=name, path=path, type="Group")
+        msg = File(id=res['id'], name=name, path=path, method=method)
+        msg.referer = self.qq
+        return msg
 
     # Message Transition
 
@@ -542,6 +602,8 @@ class MiraiSession(BotSession, Api):
             ret = raw_message.App(content=json.loads(msg['content']))
         elif type_ == 'Xml':
             ret = raw_message.Xml(content=msg['xml'])
+        elif type_ == 'File':
+            ret = File(name=msg['name'], id=msg['id'])
         else:
             logger.debug(f'Unknown message {msg} of type {type_}')
             ret = raw_message.Unknown()
@@ -593,6 +655,11 @@ class MiraiSession(BotSession, Api):
             return {
                 'type': 'Xml',
                 'xml': msg.content,
+            }
+        elif isinstance(msg, File):
+            return {
+                'type': 'File',
+                'id': msg.id,
             }
         else:
             logger.debug(f'Unknown message {msg} of type {type(msg)}')
@@ -733,6 +800,8 @@ class MiraiSession(BotSession, Api):
         # print('send now: ', raw_message)
         for msg in message:
             if isinstance(msg, Image):
+                await msg.prepare(method=upload_method.get())
+            elif isinstance(msg, File):
                 await msg.prepare(method=upload_method.get())
         # logger.debug(f'send now:  {raw_message}')
         return message

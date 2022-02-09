@@ -1,47 +1,28 @@
 import asyncio
 import base64
 import json
-from dataclasses import dataclass
-from dataclasses import field
+from dataclasses import dataclass, field
 from functools import wraps
-from typing import List
-from typing import Optional
+from typing import List, Optional
 
 import aiocqhttp
 import aiocqhttp.api
-from aiocqhttp import CQHttp
-from aiocqhttp import message as cq_message
-
 import ajenga.event as raw_event
 import ajenga.message as raw_message
-from ajenga.event import FriendMessageEvent, Event, EventType
-from ajenga.event import FriendRecallEvent
-from ajenga.event import GroupJoinEvent
-from ajenga.event import GroupLeaveEvent
-from ajenga.event import GroupMessageEvent
-from ajenga.event import GroupMuteEvent
-from ajenga.event import GroupPermission
-from ajenga.event import GroupRecallEvent
-from ajenga.event import GroupUnmuteEvent
-from ajenga.event import MessageEvent
-from ajenga.event import Sender
-from ajenga.event import TempMessageEvent
-from ajenga.log import logger
-from ajenga.message import MessageChain
-from ajenga.message import MessageElement
-from ajenga.message import MessageIdType
-from ajenga.message import Message_T
-from ajenga.models import ContactIdType
-from ajenga.models import Friend
-from ajenga.models import Group
-from ajenga.models import GroupMember
-from ajenga.protocol import Api
-from ajenga.protocol import ApiResult
-from ajenga.protocol import Code
-from ajenga.protocol import MessageSendResult
+from aiocqhttp import CQHttp
+from aiocqhttp import message as cq_message
 from ajenga.app import BotSession, get_session, register_session
 from ajenga.ctx import this
-
+from ajenga.event import (Event, EventType, FriendMessageEvent,
+                          FriendRecallEvent, GroupJoinEvent, GroupLeaveEvent,
+                          GroupMessageEvent, GroupMuteEvent, GroupPermission,
+                          GroupRecallEvent, GroupUnmuteEvent, MessageEvent,
+                          Sender, TempMessageEvent)
+from ajenga.log import logger
+from ajenga.message import (Message_T, MessageChain, MessageElement,
+                            MessageIdType)
+from ajenga.models import ContactIdType, Friend, Group, GroupMember
+from ajenga.protocol import Api, ApiResult, Code, MessageSendResult
 
 logger = logger.getChild('protocol.cqhttp')
 
@@ -90,6 +71,14 @@ class Quote(raw_message.Quote):
         return raw_message.Quote(id=self.id)
 
 
+_ALLOW_RETRY = False
+
+
+def set_allow_retry(allow_retry: bool):
+    global _ALLOW_RETRY
+    _ALLOW_RETRY = allow_retry
+
+
 def _catch(func):
     @wraps(func)
     async def wrapper(*args, **kwargs):
@@ -97,7 +86,16 @@ def _catch(func):
             return await func(*args, **kwargs)
         except Exception as e:
             logger.exception(e)
-            return ApiResult(Code.Unspecified, message=str(e))
+            if (not _ALLOW_RETRY):
+                return ApiResult(Code.Unspecified, message=str(e))
+
+            logger.info("Retrying...")
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                logger.exception(e)
+                logger.error("Retrying failed")
+                return ApiResult(Code.Unspecified, message=str(e))
 
     return wrapper
 

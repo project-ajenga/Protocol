@@ -154,3 +154,25 @@ class HttpApi(AsyncApi):
         except aiohttp.ClientError as e:
             raise ApiError(code=ApiError.CODE_REQUEST_ERROR,
                            message=str(e))
+
+    async def upload_file(self, filedata: bytes, filename: str, **params):
+        upload_data = aiohttp.FormData()
+        upload_data.add_field("file", filedata, filename=filename)
+        upload_data.add_field("sessionKey", self._session_key)
+        for item in params.items():
+            upload_data.add_fields(item)
+        try:
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(self._api_root + "uploadFileAndSend", data=upload_data) as resp:
+                    if 200 <= resp.status < 300:
+                        result = await resp.json()
+                        logger.debug(f'[resp] {result}')
+                        return _handle_api_result(result)
+                    else:
+                        raise ApiError(code=ApiError.CODE_NETWORK_ERROR,
+                                       message=f'{resp.status}')
+
+        except aiohttp.ClientError as e:
+            raise ApiError(code=ApiError.CODE_REQUEST_ERROR,
+                           message=str(e))
