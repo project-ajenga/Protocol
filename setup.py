@@ -7,7 +7,7 @@ packages = find_namespace_packages(include=('ajenga.protocol.*', ))
 
 setup(
     name='ajenga-protocol',
-    version='0.10.1',
+    version='0.11.0',
     url='https://github.com/project-ajenga/ajenga',
     license='MIT License',
     author='Hieuzest',
@@ -19,7 +19,7 @@ setup(
     package_data={
         '': ['*.pyi'],
     },
-    install_requires=['ajenga', 'quart', 'aiocqhttp'],
+    install_requires=['ajenga'],
     extras_require={
         'scheduler': ['apscheduler'],
     },
