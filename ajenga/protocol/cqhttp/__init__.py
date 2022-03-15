@@ -171,6 +171,7 @@ class CQProtocol:
         self._cqhttp = CQHttp(message_class=aiocqhttp.Message, **kwargs)
         self._api = self._cqhttp.api
 
+        @self._cqhttp.on("message_sent")
         @self._cqhttp.on_message()
         @self._cqhttp.on_request()
         @self._cqhttp.on_notice()
