@@ -85,15 +85,16 @@ def set_allow_retry(allow_retry: bool):
 
 def _catch(func):
     @wraps(func)
-    async def wrapper(*args, **kwargs):
+    async def wrapper(self, *args, **kwargs):
         try:
-            return await func(*args, **kwargs)
+            return await func(self, *args, **kwargs)
         except Exception as e:
             logger.exception(e)
             if (not _ALLOW_RETRY):
-                bot: BotSession = this.bot
-                bot.handle_event_nowait(
-                    ApiNotSuccessfulEvent(func.__name__, bot.qq, args, kwargs))
+                if isinstance(self, CQSession):
+                    self.handle_event_nowait(
+                        ApiNotSuccessfulEvent(func.__name__, self.qq, args,
+                                              kwargs))
                 return ApiResult(Code.Unspecified, message=str(e))
 
             logger.info("Retrying...")
@@ -102,9 +103,10 @@ def _catch(func):
             except Exception as e:
                 logger.exception(e)
                 logger.error("Retrying failed")
-                bot: BotSession = this.bot
-                bot.handle_event_nowait(
-                    ApiNotSuccessfulEvent(func.__name__, bot.qq, args, kwargs))
+                if isinstance(self, CQSession):
+                    self.handle_event_nowait(
+                        ApiNotSuccessfulEvent(func.__name__, self.qq, args,
+                                              kwargs))
                 return ApiResult(Code.Unspecified, message=str(e))
 
     return wrapper
