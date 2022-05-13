@@ -17,7 +17,7 @@ from ajenga.event import (Event, EventType, FriendMessageEvent,
                           FriendRecallEvent, GroupJoinEvent, GroupLeaveEvent,
                           GroupMessageEvent, GroupMuteEvent, GroupPermission,
                           GroupRecallEvent, GroupUnmuteEvent, MessageEvent,
-                          Sender, TempMessageEvent)
+                          ProtocolEvent, Sender, TempMessageEvent)
 from ajenga.log import logger
 from ajenga.message import (Message_T, MessageChain, MessageElement,
                             MessageIdType)
@@ -175,9 +175,9 @@ class GroupInvitedRequestEvent(raw_event.GroupInvitedRequestEvent):
 
 
 @dataclass
-class RawCQEvent(Event):
+class RawCQEvent(ProtocolEvent):
     type: EventType = field(default=EventType.Protocol, init=False)
-    protocol: str
+    protocol: str = field(default="cqhttp", init=False)
     event: dict
 
 
@@ -198,8 +198,7 @@ class CQProtocol:
                 return
             logger.debug(f"[event] {event}")
             # For CQ Compact:
-            session.handle_event_nowait(
-                RawCQEvent(protocol="cqhttp", event=event))
+            session.handle_event_nowait(RawCQEvent(event=event))
 
             event = session.as_event(event)
             if event:
@@ -218,6 +217,10 @@ class CQSession(BotSession, Api):
     def __init__(self, qq: ContactIdType, cq: CQHttp):
         self._qq = qq
         self._api = cq.api
+
+    @property
+    def type(self) -> str:
+        return "cqhttp"
 
     @property
     def qq(self) -> int:
