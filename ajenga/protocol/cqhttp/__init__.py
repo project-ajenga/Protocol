@@ -89,7 +89,7 @@ def _catch(func):
         try:
             return await func(self, *args, **kwargs)
         except Exception as e:
-            logger.exception(e)
+            logger.exception(e, stack_info=False)
             if (not _ALLOW_RETRY):
                 if isinstance(self, CQSession):
                     self.handle_event_nowait(
@@ -101,7 +101,7 @@ def _catch(func):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
-                logger.exception(e)
+                logger.exception(e, stack_info=False)
                 logger.error("Retrying failed")
                 if isinstance(self, CQSession):
                     self.handle_event_nowait(
