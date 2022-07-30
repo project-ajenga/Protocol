@@ -9,7 +9,7 @@ import aiocqhttp
 import aiocqhttp.api
 import ajenga.event as raw_event
 import ajenga.message as raw_message
-from aiocqhttp import CQHttp
+from aiocqhttp import ApiNotAvailable, CQHttp
 from aiocqhttp import message as cq_message
 from ajenga.app import BotSession, get_session, register_session
 from ajenga.ctx import this
@@ -88,6 +88,9 @@ def _catch(func):
     async def wrapper(self, *args, **kwargs):
         try:
             return await func(self, *args, **kwargs)
+        except ApiNotAvailable as e:
+            logger.exception(e, stack_info=False)
+            return ApiResult(Code.Unavailable, message=str(e))
         except Exception as e:
             logger.exception(e, stack_info=False)
             if (not _ALLOW_RETRY):
