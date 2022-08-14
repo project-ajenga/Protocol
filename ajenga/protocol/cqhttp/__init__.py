@@ -63,10 +63,19 @@ class Image(raw_message.Image):
 
 @dataclass
 class Voice(raw_message.Voice):
+    __struct_type__ = "cq:voice"
+    __struct_fields__ = ("url", "hash", "file")
+
     file: str = None
 
+    def __post_init__(self):
+        if self.file and not self.hash:
+            self.hash = self.file[:self.file.index('.')]
+
     async def raw(self) -> "MessageElement":
-        return raw_message.Voice(url=self.url, content=self.content)
+        return raw_message.Voice(url=self.url,
+                                 hash=self.hash,
+                                 content=self.content)
 
 
 @dataclass
@@ -475,6 +484,8 @@ class CQSession(BotSession, Api):
         elif isinstance(message, raw_message.Xml):
             return cq_message.MessageSegment(
                 type_='xml', data={'data': cq_message.escape(message.content)})
+        elif isinstance(message, raw_message.Quote):
+            return cq_message.MessageSegment.reply(message.id)
         else:
             logger.debug(f'Unknown message {message} of type {type(message)}')
             return cq_message.MessageSegment.text('')
@@ -502,7 +513,7 @@ class CQSession(BotSession, Api):
             else:
                 ret = raw_message.At(int(data['qq']))
         elif type_ == 'record':
-            ret = Voice(file=data['file'])
+            ret = Voice(file=data['file'], url=data.get("url", None))
         elif type_ == 'rich':
             ret = raw_message.App(
                 content=json.loads(cq_message.unescape(data['content'])))

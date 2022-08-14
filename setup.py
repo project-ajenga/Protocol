@@ -7,7 +7,7 @@ packages = find_namespace_packages(include=('ajenga.protocol.*', ))
 
 setup(
     name='ajenga-protocol',
-    version='0.13.2',
+    version='0.14.0',
     url='https://github.com/project-ajenga/ajenga',
     license='MIT License',
     author='Hieuzest',
